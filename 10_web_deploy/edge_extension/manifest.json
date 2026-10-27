@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Xiaoruo1 Edge Bridge",
+  "description": "Connects the local Xiaoruo1 MCP bridge to the user's visible Edge tabs without exporting cookies.",
+  "version": "1.8.4",
+  "permissions": [
+    "alarms",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs",
+    "windows"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file://*/*"],
+      "js": ["reader.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Xiaoruo1 Edge Bridge",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:48272"
+  }
+}
