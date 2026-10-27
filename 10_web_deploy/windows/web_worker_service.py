@@ -13,11 +13,11 @@ from service_common import ManagedProcessService, PYTHON, ROOT
 
 class WebWorkerService(ManagedProcessService):
     _svc_name_ = "web_worker"
-    _svc_display_name_ = "Xiaoruo1 Worker"
-    _svc_description_ = "Xiaoruo1 SQLite task queue worker"
+    _svc_display_name_ = "FreeChatMCP Worker"
+    _svc_description_ = "FreeChatMCP SQLite task queue worker"
     # Published defaults are local-only; configure optional remote features yourself.
     _environment = {
-        "WEB_AGENT_DISPLAY_NAME": "Xiaoruo1",
+        "WEB_AGENT_DISPLAY_NAME": "FreeChatMCP",
         "WEB_AGENT_WORKSPACE": os.getenv("WEB_AGENT_WORKSPACE", str(ROOT)),
         "WEB_AGENT_WORKSPACES": os.getenv("WEB_AGENT_WORKSPACES", str(ROOT)),
         "WEB_AGENT_ADMIN_MODE": os.getenv("WEB_AGENT_ADMIN_MODE", "false"),

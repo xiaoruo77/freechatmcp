@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Xiaoruo1 Edge Bridge",
-  "description": "Connects the local Xiaoruo1 MCP bridge to the user's visible Edge tabs without exporting cookies.",
+  "name": "FreeChatMCP Edge Bridge",
+  "description": "Connects the local FreeChatMCP MCP bridge to the user's visible Edge tabs without exporting cookies.",
   "version": "1.8.4",
   "permissions": [
     "alarms",
@@ -25,7 +25,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Xiaoruo1 Edge Bridge",
+    "default_title": "FreeChatMCP Edge Bridge",
     "default_popup": "popup.html"
   },
   "content_security_policy": {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, clearToken, getToken, setToken } from './api.js'
 
-const PRODUCT_NAME = 'Xiaoruo1'
+const PRODUCT_NAME = 'FreeChatMCP'
 const pretty = (value) => JSON.stringify(value, null, 2)
 const DEFAULT_MD_WORKFLOW = {
   script_path: '',

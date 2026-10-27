@@ -17,8 +17,8 @@ cloudflared = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflare
 
 class CloudflaredService(ManagedProcessService):
     _svc_name_ = "web_agent_cloudflared"
-    _svc_display_name_ = "Xiaoruo1 Cloudflare Tunnel"
-    _svc_description_ = "Cloudflare Tunnel for the local Xiaoruo1 service"
+    _svc_display_name_ = "FreeChatMCP Cloudflare Tunnel"
+    _svc_description_ = "Cloudflare Tunnel for the local FreeChatMCP service"
     _health_check_interval_seconds = 30.0
     _health_check_failures_before_restart = 6
     _health_check_timeout_seconds = 8.0
@@ -88,7 +88,7 @@ class CloudflaredService(ManagedProcessService):
         # A missing/unreadable metrics endpoint still indicates a dead child.
         metrics_request = Request(
             self._metrics_url,
-            headers={"User-Agent": "Xiaoruo1-cloudflared-watchdog/1.0"},
+            headers={"User-Agent": "FreeChatMCP-cloudflared-watchdog/1.0"},
         )
         with self._health_opener.open(metrics_request, timeout=self._health_check_timeout_seconds) as response:
             metrics = response.read(256 * 1024).decode("utf-8", "replace")

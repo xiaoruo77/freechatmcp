@@ -14,8 +14,8 @@ from service_common import ManagedProcessService, PYTHON, ROOT
 
 class WebMcpService(ManagedProcessService):
     _svc_name_ = "web_mcp"
-    _svc_display_name_ = "Xiaoruo1 MCP API"
-    _svc_description_ = "Local Xiaoruo1 FastAPI and Streamable HTTP MCP service"
+    _svc_display_name_ = "FreeChatMCP MCP API"
+    _svc_description_ = "Local FreeChatMCP FastAPI and Streamable HTTP MCP service"
     _health_check_interval_seconds = 15.0
     _health_check_failures_before_restart = 3
     _health_check_timeout_seconds = 3.0
@@ -23,7 +23,7 @@ class WebMcpService(ManagedProcessService):
     _health_url = "http://127.0.0.1:48271/health"
     # Never hard-code real domains, wide file access or privileged settings.
     _environment = {
-        "WEB_AGENT_DISPLAY_NAME": "Xiaoruo1",
+        "WEB_AGENT_DISPLAY_NAME": "FreeChatMCP",
         "WEB_AGENT_OAUTH_ENABLED": os.getenv("WEB_AGENT_OAUTH_ENABLED", "0"),
         "WEB_AGENT_PUBLIC_URL": os.getenv("WEB_AGENT_PUBLIC_URL", ""),
         "WEB_AGENT_OAUTH_ISSUER_URL": os.getenv("WEB_AGENT_OAUTH_ISSUER_URL", ""),
@@ -37,7 +37,7 @@ class WebMcpService(ManagedProcessService):
     _command = [str(PYTHON), str(ROOT / "run_server.py")]
 
     def _health_check(self) -> bool:
-        request = Request(self._health_url, headers={"User-Agent": "Xiaoruo1-web-mcp-watchdog/1.0"})
+        request = Request(self._health_url, headers={"User-Agent": "FreeChatMCP-web-mcp-watchdog/1.0"})
         with urlopen(request, timeout=self._health_check_timeout_seconds) as response:
             return response.status == 200 and b'"status"' in response.read(2048)
 

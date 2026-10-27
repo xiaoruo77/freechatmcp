@@ -1,6 +1,10 @@
-# Xiaoruo1
+# FreeChatMCP
 
-Open-source self-hosted Windows agent toolbox for controlling a local computer from an authorized ChatGPT MCP client. ChatGPT orchestrates calls in the conversation, while local workers perform explicit tool operations, without needing a secondary AI model or extra model API subscription.
+Open-source bridge that lets a supported web-chat AI client control a local Windows computer through MCP, without purchasing a separate LLM API. ChatGPT orchestrates calls in the conversation, while local workers perform explicit tool operations, without needing an extra model API subscription. The web-chat account may still require a paid plan, remain subject to usage limits, and must support MCP/app tool connections.
+
+**Web chat is the brain; your computer is the worker. No extra LLM API required.**
+
+This is not an API bypass, a way to obtain unlimited AI calls, or a zero-cost guarantee. It uses supported client-side integration and user-authorized tool calls.
 
 ## Components
 
@@ -17,7 +21,7 @@ Open-source self-hosted Windows agent toolbox for controlling a local computer f
 
 Requires Windows, an appropriate Python installation, Node.js/npm for the frontend, and optional third-party runtimes for desktop features.
 
-1. Clone the GitHub repository xiaoruo77/xiaoruo1.
+1. Clone the GitHub repository xiaoruo77/freechatmcp.
 2. Run python -m venv .venv in the project directory.
 3. Install packages using .venv/Scripts/python.exe -m pip install -e ".[dev]".
 4. In 01_web_frontend, run npm install and npm run build.
