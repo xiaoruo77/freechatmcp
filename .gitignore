@@ -21,7 +21,8 @@ __pycache__/
 *.crt
 *.jsonl
 *.zip
-08_web_data/
+08_web_data/*
+!08_web_data/schema.sql
 09_web_logs/
 07_web_config/orchestration.json
 07_web_config/windows_mcp.json
