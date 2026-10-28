@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FreeChatMCP Edge Bridge",
   "description": "Connects the local FreeChatMCP MCP bridge to the user's visible Edge tabs without exporting cookies.",
-  "version": "1.8.4",
+  "version": "1.9.0",
   "permissions": [
     "alarms",
     "downloads",
@@ -16,8 +16,14 @@
   ],
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*", "file://*/*"],
-      "js": ["reader.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*",
+        "file://*/*"
+      ],
+      "js": [
+        "reader.js"
+      ],
       "run_at": "document_idle"
     }
   ],
@@ -30,5 +36,8 @@
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:48272"
-  }
+  },
+  "optional_permissions": [
+    "debugger"
+  ]
 }

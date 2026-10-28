@@ -398,6 +398,19 @@ button{{padding:12px 18px;border:0;border-radius:8px;background:#111;color:white
         pending["request_id"] = request_id
         return HTMLResponse(render_consent_page(pending, error), status_code=400)
 
+    @app.get("/upload-test/fixture.html", include_in_schema=False)
+    async def fixed_upload_fixture():
+        # Fixed non-sensitive test HTML only. Never expose a filesystem route,
+        # selected local file, browser state or credentials through this URL.
+        fixture = runtime_settings.project_root / "10_web_deploy" / "validation_runs" / "bilibili-web-upload-20261027" / "fixture.html"
+        if not fixture.is_file():
+            raise HTTPException(status_code=404, detail="Upload fixture is not installed")
+        return FileResponse(fixture, media_type="text/html", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    @app.get("/upload-test/{unavailable:path}", include_in_schema=False)
+    async def reject_fixture_paths(unavailable: str):
+        raise HTTPException(status_code=404, detail="Only the fixed test fixture is available")
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {"status": "ok", "service": "web_agent", "display_name": runtime_settings.display_name, "mcp_path": "/mcp", "host": runtime_settings.host, "port": runtime_settings.port, "orchestration_mode": runtime_settings.orchestration_mode}

@@ -6,6 +6,10 @@ Open-source bridge that lets a supported web-chat AI client control a local Wind
 
 This is not an API bypass, a way to obtain unlimited AI calls, or a zero-cost guarantee. It uses supported client-side integration and user-authorized tool calls.
 
+## v0.2.0 — Browser control and upload
+
+New support for unified browser operations, Windows native IPC, file upload workflows and accompanying tests. This release retains the original MCP tool interfaces and excludes local credentials, runtime state, and browser binaries.
+
 ## Components
 
 - 02_web_mcp: FastAPI/MCP endpoints, OAuth and authorization

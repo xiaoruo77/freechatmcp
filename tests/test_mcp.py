@@ -9,7 +9,7 @@ def test_mcp_tool_registration():
         "list_directory", "get_path_info", "create_directory", "read_file", "write_file", "patch_file", "copy_path", "move_path", "delete_path", "search_file", "find_paths", "inspect_project", "modify_project",
         "get_system_info", "list_processes", "list_wsl_directory", "discover_environment", "self_check", "search_web", "git_status", "git_diff", "git_log", "git_branches", "git_commit", "run_python_script", "run_wsl_workflow", "run_powershell_workflow", "run_cmd_workflow", "run_terminal_workflow", "run_project_build", "run_md_simulation", "run_production_md", "create_task", "run_workflow_until_complete", "run_autonomous_workflow", "monitor_task", "list_tasks", "read_task_output", "retry_task", "cancel_task", "list_conversations", "get_conversation",
         "create_canvas", "get_canvas", "update_canvas", "list_canvas_history", "restore_canvas_revision",
-        "browser_list_tabs", "browser_list_downloads", "browser_open_tab", "browser_navigate", "browser_read_page", "browser_click", "browser_type", "browser_select_option", "browser_wait", "browser_screenshot", "browser_close_tab",
+        "browser_upload_file", "browser_upload_status", "video_project_path", "browser_list_tabs", "browser_list_downloads", "browser_open_tab", "browser_navigate", "browser_read_page", "browser_click", "browser_type", "browser_select_option", "browser_wait", "browser_screenshot", "browser_close_tab",
     }
     assert required <= names
 

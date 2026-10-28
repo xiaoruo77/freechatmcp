@@ -95,7 +95,7 @@ def normalize_result(operation: str, value: Any) -> dict[str, Any]:
     elif status not in {"cancelled", "blocked"}:
         status = "completed"
     terminal = not (active or planning)
-    code = raw.get("error_code") or raw.get("error_class") or ("operation_failed" if failed else None)
+    code = raw.get("error_code") or raw.get("error_class") or (error.get("code") if isinstance(error, dict) else None) or ("operation_failed" if failed else None)
     message = safe_error(error) if error else ("Operation failed; inspect returned evidence" if failed else None)
     evidence = raw.get("evidence")
     if not isinstance(evidence, dict):

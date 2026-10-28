@@ -6,7 +6,7 @@ import inspect
 from functools import wraps
 import base64
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.auth.provider import OAuthAuthorizationServerProvider, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -757,6 +757,84 @@ async def browser_press(
 
 
 @mcp.tool()
+async def browser_instances(timeout: int = 10_000, ctx: Context | None = None) -> dict[str, Any]:
+    """Discover connected authenticated browser instances, capabilities, generation and tabs.
+
+    Xiaoruo v72 prefers authenticated local Named Pipe; Edge keeps its extension.
+    Does not launch browsers or copy profile/login data. Select returned ids for
+    browser_control; reused or ambiguous tab ids must never be guessed.
+    """
+    return await _invoke_with_heartbeat("browser_instances", {"timeout": timeout, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
+async def browser_control(browser_id: str,
+    action: Literal["status", "list_tabs", "open_tab", "close_tab", "activate_tab", "navigate", "read", "click", "type", "press", "select", "scroll", "wait", "screenshot", "downloads", "task_status", "reconcile"],
+    tab_id: str | None = None, arguments: dict[str, Any] | None = None,
+    operation_id: str | None = None, confirm: bool = False, timeout: int = 30_000,
+    ctx: Context | None = None) -> dict[str, Any]:
+    """Use the unified adapter for one explicit browser instance and tab.
+
+    Writes require confirm=true, stable operation_id and arguments.expected_generation
+    from discovery. Unknown outcomes require a fresh read and explicit evidence-based
+    reconcile, never blind replay. No hidden model or arbitrary JavaScript.
+    """
+    return await _invoke_with_heartbeat("browser_control", {"browser_id": browser_id, "action": action,
+        "tab_id": tab_id, "arguments": arguments, "operation_id": operation_id, "confirm": confirm,
+        "timeout": timeout, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
+async def browser_debug_control(browser_id: str, tab_id: str,
+    action: Literal["status", "attach", "snapshot", "detach"] = "status",
+    arguments: dict[str, Any] | None = None, operation_id: str | None = None,
+    confirm: bool = False, timeout: int = 10_000, ctx: Context | None = None) -> dict[str, Any]:
+    """Opt-in bounded Chromium debugging; unavailable permission yields a real refusal.
+
+    Does not request debugger permission automatically or expose arbitrary scripts,
+    cookies, credentials or a network debugger port. User detach remains supported.
+    """
+    return await _invoke_with_heartbeat("browser_debug_control", {"browser_id": browser_id, "tab_id": tab_id,
+        "action": action, "arguments": arguments, "operation_id": operation_id,
+        "confirm": confirm, "timeout": timeout, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
+async def browser_upload_file(tab_id: str, selector: str, file_path: str, idempotency_key: str,
+                              confirm: bool = False, timeout: int = 30_000,
+                              ctx: Context | None = None) -> dict[str, Any]:
+    """Select an authorized local MP4/cover using real file bytes in the current Edge tab.
+
+    First read file_inputs and use one exact observed selector. A generic name
+    matching multiple inputs is rejected. confirm=true and a stable unique
+    idempotency_key are required. A file_selected result does not prove server
+    receipt or platform processing. On timeout/cancellation query upload_status
+    and read the webpage before deciding next steps; never blindly replay.
+    Only approved media inside the fixed external dated video project is allowed.
+    """
+    return await _invoke_with_heartbeat("browser_upload_file", {
+        "tab_id": tab_id, "selector": selector, "file_path": file_path,
+        "idempotency_key": idempotency_key, "confirm": confirm, "timeout": timeout, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
+async def browser_upload_status(idempotency_key: str, ctx: Context | None = None) -> dict[str, Any]:
+    """Read a prior upload selection attempt without repeating its side effects."""
+    return await _invoke_with_heartbeat("browser_upload_status", {"idempotency_key": idempotency_key, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
+async def video_project_path(date: str | None = None, create: bool = False,
+                             ctx: Context | None = None) -> dict[str, Any]:
+    """Resolve the fixed external video root/yyyy_MM/dd, optionally creating it.
+
+    date is YYYY-MM-DD, default today in Asia/Shanghai. Never save video material
+    or finished videos inside the MCP program directory.
+    """
+    return await _invoke_with_heartbeat("video_project_path", {"date": date, "create": create, "__mcp_ctx": ctx}, ctx)
+
+
+@mcp.tool()
 async def browser_select_option(
     tab_id: str,
     option: str,
@@ -1303,6 +1381,12 @@ _MCP_TOOL_FUNCTIONS = [
     browser_type,
     browser_press,
     browser_select_option,
+    browser_upload_file,
+    browser_upload_status,
+    browser_instances,
+    browser_control,
+    browser_debug_control,
+    video_project_path,
     browser_wait,
     browser_screenshot,
     browser_close_tab,
@@ -1344,8 +1428,9 @@ def _direct_public_tool(function):
     async def invoke(*args, **kwargs):
         result = normalize_result(function.__name__, await function(*args, **kwargs))
         content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
-        if function.__name__ in {"windows_snapshot", "windows_screenshot"}:
-            private_root = (registry().ctx.settings.data_root / "windows_mcp").resolve()
+        native_browser_image = function.__name__ == "browser_control" and result.get("action") == "screenshot" and result.get("ok") is True
+        if function.__name__ in {"windows_snapshot", "windows_screenshot"} or native_browser_image:
+            private_root = (registry().ctx.settings.data_root / ("browser_screenshots" if native_browser_image else "windows_mcp")).resolve()
             for artifact in result.get("artifacts", []):
                 if not isinstance(artifact, dict) or artifact.get("mime_type") not in {"image/png", "image/jpeg", "image/webp"}:
                     continue
@@ -1389,7 +1474,7 @@ def build_mcp(
     read_tools = {"list_directory", "get_path_info", "read_file", "search_file", "find_paths", "inspect_project",
         "get_system_info", "list_processes", "discover_environment", "goal_status", "task_status", "task_log",
         "monitor_task", "wait_task", "list_tasks", "read_task_output", "browser_list_tabs", "browser_list_downloads",
-        "browser_read_page", "browser_read", "browser_screenshot", "windows_snapshot", "windows_screenshot", "windows_control_status"}
+        "browser_read_page", "browser_read", "browser_screenshot", "browser_upload_status", "browser_instances", "windows_snapshot", "windows_screenshot", "windows_control_status"}
     for function in _MCP_TOOL_FUNCTIONS:
         direct = orchestration_mode == "chatgpt_direct"
         server.tool(annotations=ToolAnnotations(readOnlyHint=function.__name__ in read_tools,

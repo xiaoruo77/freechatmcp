@@ -16,6 +16,41 @@ if (!globalThis.__xiaoruo1ReaderInstalled) {
     let root = null;
     let rootSelector = "";
 
+    const collectFileInputs = () => {
+      const key = "__xiaoruo1UploadObservation";
+      let observed = globalThis[key];
+      const currentUrl = String(location.href || "");
+      if (!observed || observed.url !== currentUrl) {
+        observed = {url: currentUrl, document_id: crypto.randomUUID(), entries: new Map()};
+        globalThis[key] = observed;
+      }
+      const now = Date.now();
+      for (const [token, entry] of observed.entries) {
+        if (!entry.element.isConnected || now - entry.observed_at > 900000) observed.entries.delete(token);
+      }
+      return Array.from(document.querySelectorAll('input[type="file"]')).slice(0, 32).map((element) => {
+        let token = null;
+        for (const [candidate, entry] of observed.entries) {
+          if (entry.element === element) { token = candidate; break; }
+        }
+        if (!token) token = crypto.randomUUID();
+        element.setAttribute("data-xiaoruo1-upload-id", token);
+        observed.entries.set(token, {element, observed_at: now});
+        return {
+          selector: 'input[type="file"][data-xiaoruo1-upload-id="' + token + '"]',
+          document_id: observed.document_id,
+          frame_url: currentUrl,
+          id: String(element.id || ""),
+          name: String(element.name || ""),
+          accept: String(element.accept || ""),
+          multiple: Boolean(element.multiple),
+          disabled: Boolean(element.disabled),
+          selected_files: Array.from(element.files || []).map((file) => ({name: file.name, size: file.size, type: file.type})),
+          observed_at: now
+        };
+      });
+    };
+
     const collectInteractiveElements = () => {
       const visibleNow = (el) => {
         if (!el) return false;
@@ -141,7 +176,8 @@ if (!globalThis.__xiaoruo1ReaderInstalled) {
       strategy: rootSelector,
       frame_url: String(location.href || ""),
       frame_title: String(document.title || ""),
-      interactive_elements: collectInteractiveElements()
+      interactive_elements: collectInteractiveElements(),
+      file_inputs: collectFileInputs()
     };
   }
 

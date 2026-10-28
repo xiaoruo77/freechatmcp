@@ -12,6 +12,8 @@ os.environ.setdefault("WEB_AGENT_HOME", str(ROOT))
 os.environ.setdefault("WEB_AGENT_WORKSPACE", str(ROOT))
 os.environ.setdefault("WEB_AGENT_TOKEN", "pytest-token")
 os.environ.setdefault("WEB_AGENT_EMBEDDED_WORKER", "false")
+# Unit suites must never reserve a real browser's single native IPC slot.
+os.environ.setdefault("WEB_AGENT_NATIVE_BROWSER_IPC_ENABLED", "false")
 
 
 @pytest.fixture

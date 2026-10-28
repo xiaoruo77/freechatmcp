@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 from pathlib import Path
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -10,6 +11,7 @@ import win32serviceutil
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from service_common import ManagedProcessService, ROOT
+from tunnel_health import TunnelObservation, TunnelReadinessPolicy, observe_metrics
 
 
 cloudflared = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe"
@@ -17,11 +19,14 @@ cloudflared = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflare
 
 class CloudflaredService(ManagedProcessService):
     _svc_name_ = "web_agent_cloudflared"
-    _svc_display_name_ = "FreeChatMCP Cloudflare Tunnel"
-    _svc_description_ = "Cloudflare Tunnel for the local FreeChatMCP service"
+    _svc_display_name_ = "Xiaoruo1 Cloudflare Tunnel"
+    _svc_description_ = "Cloudflare Tunnel for the local Xiaoruo1 service"
     _health_check_interval_seconds = 30.0
-    _health_check_failures_before_restart = 6
+    # Readiness policy below opens the parent's restart gate only when due.
+    _health_check_failures_before_restart = sys.maxsize
     _health_check_timeout_seconds = 8.0
+    _readiness_grace_seconds = 180.0
+    _readiness_restart_cooldown_seconds = 900.0
     _health_log_path = ROOT / "09_web_logs" / "cloudflared_watchdog.log"
     _metrics_url = "http://127.0.0.1:20241/metrics"
     _health_opener = build_opener(ProxyHandler({}))
@@ -64,6 +69,14 @@ class CloudflaredService(ManagedProcessService):
         "codex",
     ]
 
+    def __init__(self, args):
+        super().__init__(args)
+        self._readiness = TunnelReadinessPolicy(
+            self._readiness_grace_seconds, self._readiness_restart_cooldown_seconds
+        )
+        self._child_has_started = False
+        self._health_check_failures_before_restart = sys.maxsize
+
     def _start_child(self):
         if self._child_env is not None:
             # Remove any machine-level proxy variables from this child only.
@@ -79,30 +92,33 @@ class CloudflaredService(ManagedProcessService):
         # and sends cloudflared to unroutable 198.18.x.x addresses.
         self._command = list(self._command_template)
         super()._start_child()
+        self._readiness.child_started(time.monotonic(), restarted=self._child_has_started)
+        self._child_has_started = True
+        self._health_check_failures_before_restart = sys.maxsize
 
     def _health_check(self) -> bool:
-        # cloudflared owns edge reconnects and can legitimately report /ready
-        # as 503 while it is retrying a blocked or changing network path. The
-        # watchdog must not restart it merely for having zero edge
-        # connections, because that resets cloudflared's backoff each time.
-        # A missing/unreadable metrics endpoint still indicates a dead child.
+        # Report readiness honestly even while the metrics process is alive.
+        # Only sustained loss permits a restart; the cooldown preserves the
+        # child's reconnect backoff during a prolonged network outage.
         metrics_request = Request(
             self._metrics_url,
-            headers={"User-Agent": "FreeChatMCP-cloudflared-watchdog/1.0"},
+            headers={"User-Agent": "Xiaoruo1-cloudflared-watchdog/1.0"},
         )
-        with self._health_opener.open(metrics_request, timeout=self._health_check_timeout_seconds) as response:
-            metrics = response.read(256 * 1024).decode("utf-8", "replace")
-        active_connections = None
-        for line in metrics.splitlines():
-            if line.startswith("cloudflared_tunnel_ha_connections "):
-                try:
-                    active_connections = float(line.rsplit(" ", 1)[1])
-                except (TypeError, ValueError):
-                    return False
-                # Keep the variable parsed for validation and future logging;
-                # zero is a transient edge state, not a dead process.
-                return active_connections >= 0
-        return False
+        try:
+            with self._health_opener.open(metrics_request, timeout=self._health_check_timeout_seconds) as response:
+                metrics = response.read(256 * 1024).decode("utf-8", "replace")
+            observation = observe_metrics(metrics)
+        except Exception:
+            # Do not put request details or raw exception text in service logs.
+            observation = TunnelObservation(False, False, "metrics_unreachable")
+        decision = self._readiness.evaluate(observation, time.monotonic())
+        for event in decision.events:
+            self._write_health_log(event)
+        # The parent reads this threshold after every False result. Keep the
+        # result False during the grace/cooldown, but inhibit its restart branch.
+        # A crashed/exited child still follows the parent's separate retry path.
+        self._health_check_failures_before_restart = 1 if decision.restart_allowed else sys.maxsize
+        return decision.ready
 
 
 if __name__ == "__main__":

@@ -1876,6 +1876,12 @@ class ToolRegistry:
             "browser_click": ToolSpec("browser_click", "Click one addressed element in the local Edge tab and verify a URL, page-content, target-state, or completed download change. A click is an intermediate action, not completion; call it without an assistant bridge message. If verification is click_sent_no_immediate_state_change, wait/read again in the same turn instead of stopping. For downloads use the returned download.file_path, never a guessed Downloads path.", scope="browser"),
             "browser_type": ToolSpec("browser_type", "Type text into one addressed visible element in the local Edge tab and verify the resulting value. For a native HTML select/combobox, use the exact CSS selector returned by browser_read_page and pass the option's visible label as text; this same tool selects that option and verifies the resulting control value. Typing/selection is an intermediate action, not completion; call it without an assistant bridge message, continue the requested sequence and final verification in the same turn. Prefer by=css with the exact selector returned by browser_read_page.", scope="browser"),
             "browser_press": ToolSpec("browser_press", "Press a real keyboard key in the local Edge page or the addressed visible element and verify the resulting page/target state. Use this for keyboard-only controls such as @-mention autocomplete, ArrowDown, Enter, Escape, and Tab. This is an intermediate action, not completion; continue the same task and verify the terminal result.", scope="browser"),
+            "browser_instances": ToolSpec("browser_instances", "Discover authenticated browser instances, generation, capabilities and tabs without starting a new browser or copying login data. Use explicit returned browser_id/tab_id for browser_control.", scope="browser"),
+            "browser_control": ToolSpec("browser_control", "Operate one explicit existing browser instance/tab through the unified adapter. Writes require confirm=true, a unique operation_id and arguments.expected_generation from discovery; unknown outcomes are fenced, never blindly replayed. No arbitrary JavaScript or private ChatGPT protocol. Publishing remains separately authorized.", scope="browser"),
+            "browser_debug_control": ToolSpec("browser_debug_control", "Inspect or explicitly attach/detach bounded Chromium debugging for one selected tab. Debugger permissions must already be granted; never requests or expands permissions automatically. Normal control remains available when unsupported. No arbitrary JavaScript, cookies or network tracing.", scope="browser"),
+            "browser_upload_file": ToolSpec("browser_upload_file", "Select real bytes from an explicitly authorized media file in a previously observed unique file input in the current Edge tab. Requires confirm=true, an absolute date-project path and a unique idempotency_key. Read file_inputs first; selection is not proof of network upload or platform processing. After uncertainty query browser_upload_status and inspect the page; never blindly repeat uploads. Bilibili web only, never the desktop client.", scope="browser"),
+            "browser_upload_status": ToolSpec("browser_upload_status", "Read the durable result of a prior file-selection request without sending or repeating it. Inspect the actual webpage separately for upload/processing/draft evidence.", scope="browser"),
+            "video_project_path": ToolSpec("video_project_path", "Resolve the fixed external Bilibili video project root/yyyy_MM/dd for an ISO date in Asia/Shanghai; optionally create that directory. Video assets must never be written in the MCP source project.", scope="workspace"),
             "browser_select_option": ToolSpec("browser_select_option", "Select one option in a native HTML select/combobox in the local Edge tab and verify the selected value/index changed. Use browser_read_page first, pass the exact CSS selector for the select, and use option_by=label for visible option text, option_by=value for the option value, or option_by=index for a zero-based option index. This is an intermediate action; call it without an assistant bridge message, continue the page workflow and verify its final result.", scope="browser"),
             "browser_wait": ToolSpec("browser_wait", "Wait for a local browser tab to settle and return a fresh page snapshot. Waiting alone is never completion of a larger task; use the returned snapshot to continue inspecting or acting and do not return any user-facing answer while the requested result is unverified. Call it without an assistant bridge message and always pass the explicit tab_id in a multi-step workflow.", scope="browser"),
             "browser_screenshot": ToolSpec("browser_screenshot", "Save a screenshot of a local browser tab under the private data directory.", scope="browser"),
@@ -3367,6 +3373,48 @@ class ToolRegistry:
             timeout=timeout,
         )
         return await self.ctx.browser.press_key(request)
+
+    async def _browser_instances(self, timeout: int = 10_000) -> dict[str, Any]:
+        return await self.ctx.browser.browser_instances(timeout=timeout)
+
+    async def _browser_control(self, browser_id: str, action: str, tab_id: str | None = None,
+                               arguments: dict[str, Any] | None = None, operation_id: str | None = None,
+                               confirm: bool = False, timeout: int = 30_000) -> dict[str, Any]:
+        reads = {"status", "list_tabs", "read", "screenshot", "downloads", "task_status"}
+        if action not in reads and not self.ctx.settings.admin_mode:
+            raise PermissionError("Browser writes require the existing admin mode permission")
+        return await self.ctx.browser.browser_control(browser_id=browser_id, action=action, tab_id=tab_id,
+            arguments=arguments, operation_id=operation_id, confirm=confirm, timeout=timeout)
+
+    async def _browser_debug_control(self, browser_id: str, tab_id: str, action: str = "status",
+                                     arguments: dict[str, Any] | None = None,
+                                     operation_id: str | None = None, confirm: bool = False,
+                                     timeout: int = 10_000) -> dict[str, Any]:
+        if action not in {"status", "attach", "snapshot", "detach"}:
+            raise ValueError("Unsupported bounded debugger action")
+        if action in {"attach", "detach"} and not self.ctx.settings.admin_mode:
+            raise PermissionError("Debugger changes require the existing admin mode permission")
+        return await self.ctx.browser.browser_control(browser_id=browser_id, action="debug_" + action,
+            tab_id=tab_id, arguments=arguments, operation_id=operation_id, confirm=confirm, timeout=timeout)
+
+    async def _browser_upload_file(self, tab_id: str, selector: str, file_path: str,
+                                   idempotency_key: str, confirm: bool = False,
+                                   timeout: int = 30_000) -> dict[str, Any]:
+        if not self.ctx.settings.admin_mode:
+            raise PermissionError("Media upload requires the existing admin mode permission")
+        if confirm is not True:
+            raise PermissionError("File upload requires explicit confirm=true")
+        return await self.ctx.browser.upload_file(tab_id=tab_id, selector=selector,
+            file_path=file_path, confirm=confirm, timeout=timeout, idempotency_key=idempotency_key)
+
+    async def _browser_upload_status(self, idempotency_key: str) -> dict[str, Any]:
+        return await self.ctx.browser.upload_status(idempotency_key)
+
+    async def _video_project_path(self, date: str | None = None, create: bool = False) -> dict[str, Any]:
+        from web_tools.video_paths import video_project_path
+        if create and not self.ctx.settings.admin_mode:
+            raise PermissionError("Creating a video project directory requires existing admin mode")
+        return await asyncio.to_thread(video_project_path, date, create)
 
     async def _browser_select_option(
         self,

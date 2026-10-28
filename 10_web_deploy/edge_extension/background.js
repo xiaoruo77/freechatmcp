@@ -1,10 +1,12 @@
-importScripts("config.js");
+importScripts("config.js", "upload.js", "identity.js", "advanced.js", "unified-actions.js");
 
 const BRIDGE_PORT = 48272;
 const TOKEN = String(globalThis.XIAORUO1_BRIDGE_TOKEN || "");
 const WS_URL = `ws://127.0.0.1:${BRIDGE_PORT}/ws?token=${encodeURIComponent(TOKEN)}`;
 const CONNECT_ALARM = "xiaoruo1-edge-bridge-connect";
-const EXTENSION_VERSION = "1.8.4";
+const EXTENSION_VERSION = "1.9.0";
+const BROWSER_FAMILY = /Edg\//.test(navigator.userAgent || "") ? "edge" : "chromium-other";
+const BROWSER_VERSION = ((navigator.userAgent || "").match(/(?:Edg|Chrome)\/([0-9.]+)/) || [])[1] || "unknown";
 const READ_LOAD_GRACE_MS = 2500;
 const READ_CONTENT_TIMEOUT_MS = 6000;
 const READ_SCRIPT_TIMEOUT_MS = 8000;
@@ -422,6 +424,8 @@ async function listTabs() {
   const tabs = await chrome.tabs.query({});
   rememberTabs(tabs);
   return {
+    ...(await browserIdentity()),
+    extension_version: EXTENSION_VERSION,
     tabs: tabs.map((tab) => ({
       tab_id: String(tab.id),
       title: tab.title || "",
@@ -575,6 +579,41 @@ function extractReadableDocument(limit, requestedSelector, requestedMode) {
   let root = null;
   let rootSelector = "";
 
+  const collectFileInputs = () => {
+    const key = "__xiaoruo1UploadObservation";
+    let observed = globalThis[key];
+    const currentUrl = String(location.href || "");
+    if (!observed || observed.url !== currentUrl) {
+      observed = {url: currentUrl, document_id: crypto.randomUUID(), entries: new Map()};
+      globalThis[key] = observed;
+    }
+    const now = Date.now();
+    for (const [token, entry] of observed.entries) {
+      if (!entry.element.isConnected || now - entry.observed_at > 900000) observed.entries.delete(token);
+    }
+    return Array.from(document.querySelectorAll('input[type="file"]')).slice(0, 32).map((element) => {
+      let token = null;
+      for (const [candidate, entry] of observed.entries) {
+        if (entry.element === element) { token = candidate; break; }
+      }
+      if (!token) token = crypto.randomUUID();
+      element.setAttribute("data-xiaoruo1-upload-id", token);
+      observed.entries.set(token, {element, observed_at: now});
+      return {
+        selector: 'input[type="file"][data-xiaoruo1-upload-id="' + token + '"]',
+        document_id: observed.document_id,
+        frame_url: currentUrl,
+        id: String(element.id || ""),
+        name: String(element.name || ""),
+        accept: String(element.accept || ""),
+        multiple: Boolean(element.multiple),
+        disabled: Boolean(element.disabled),
+        selected_files: Array.from(element.files || []).map((file) => ({name: file.name, size: file.size, type: file.type})),
+        observed_at: now
+      };
+    });
+  };
+
   const collectInteractiveElements = () => {
     const visibleNow = (el) => {
       if (!el) return false;
@@ -695,7 +734,8 @@ function extractReadableDocument(limit, requestedSelector, requestedMode) {
     strategy: rootSelector,
     frame_url: String(location.href || ""),
     frame_title: String(document.title || ""),
-    interactive_elements: collectInteractiveElements()
+    interactive_elements: collectInteractiveElements(),
+    file_inputs: collectFileInputs()
   };
 }
 
@@ -819,7 +859,8 @@ async function readPage(params) {
     extraction: primary.extraction || "dom-text-native",
     strategy: primary.strategy || "",
     frames: frameSummaries,
-    interactive_elements: Array.isArray(primary.interactive_elements) ? primary.interactive_elements : []
+    interactive_elements: Array.isArray(primary.interactive_elements) ? primary.interactive_elements : [],
+    file_inputs: ordered.flatMap((frame) => (Array.isArray(frame.result.file_inputs) ? frame.result.file_inputs : []).map((input) => ({...input, frame_id: Number(frame.frameId || 0)})))
   };
   if (recovery) {
     response.recovery = recovery;
@@ -1403,33 +1444,41 @@ async function closeTab(params) {
   return {tab_id: String(id), closed: true, title: tab.title || "", url: tab.url || ""};
 }
 
-const COMMANDS = {list_tabs: listTabs, list_downloads: listDownloads, open_tab: openTab, navigate, read_page: readPage, click: clickElement, type_text: typeText, press_key: pressKey, select_option: selectOption, wait: waitTab, screenshot, close_tab: closeTab};
+const COMMANDS = {activate_tab:activateTab,scroll:scrollTab,connection_status:async()=>({...await browserIdentity(),connected}),debug_status:debugStatus,debug_attach:debugAttach,debug_snapshot:debugSnapshot,debug_detach:debugDetach,list_tabs: listTabs, list_downloads: listDownloads, open_tab: openTab, navigate, read_page: readPage, click: clickElement, type_text: typeText, press_key: pressKey, select_option: selectOption, upload_file: uploadFile, wait: waitTab, screenshot, close_tab: closeTab};
 
 async function handleCommand(message) {
   if (!message || !message.id || !message.method) return;
   const command = COMMANDS[message.method];
   if (!command) return reply(message.id, null, new Error(`Unknown Edge bridge command: ${message.method}`));
   try {
-    const result = await command(message.params || {});
+    const params = message.params || {};
+    const scoped = {read_page:"read",click:"click",type_text:"type",press_key:"press",select_option:"select"}[message.method];
+    const result = scoped && scopedRequested(params) ? await scopedAction(params,scoped) : await command(params);
     reply(message.id, result, null);
   } catch (error) {
+    if (message.method === "upload_file" && error.action_may_have_run === false) {
+      const code = /^upload_[a-z_]+$/.test(String(error.message || "")) ? String(error.message) : "upload_refused_before_selection";
+      return reply(message.id, {file_selected:false, action_may_have_run:false, error:{code},
+        stages:{file_selected:false, upload_started:null, server_received:null, platform_processed:null}}, null);
+    }
     reply(message.id, null, error);
   }
 }
 
-function connect() {
+async function connect() {
+  const identity = await browserIdentity();
   if (!TOKEN || (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING))) return;
   try {
     const current = new WebSocket(WS_URL);
     socket = current;
     current.onopen = () => {
       setBadge(true);
-      send({type: "hello_ack", client: "xiaoruo1-edge-extension", version: EXTENSION_VERSION});
+      send({type:"hello_ack",client:"xiaoruo1-bridge",...identity});
     };
     current.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
-        if (message.type === "hello") return send({type: "hello_ack", client: "xiaoruo1-edge-extension", version: EXTENSION_VERSION});
+        if (message.type === "hello") return send({type:"hello_ack",client:"xiaoruo1-bridge",...identity});
         handleCommand(message);
       } catch (_) {}
     };

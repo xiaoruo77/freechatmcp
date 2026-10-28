@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>Xiaoruo1 Edge upload fixture</title>
+<h1>Xiaoruo1 文件选择测试；不提交到外部服务器</h1>
+<label>单个文件<input id="single" type="file" accept="video/mp4,image/png,image/jpeg"></label>
+<label>重复名称一<input name="buploader" type="file" accept="video/*"></label>
+<label>重复名称二<input name="buploader" type="file" accept="video/*" style="display:none"></label>
+<label>禁用<input id="disabled" type="file" disabled></label>
+<button id="clear" type="button">清空测试选择</button>
+<pre id="result">No file selected</pre>
+<script>
+window.fixtureChanges = 0;
+for (const input of document.querySelectorAll('input[type="file"]')) {
+  input.addEventListener('change', () => {
+    window.fixtureChanges++;
+    document.querySelector('#result').textContent = JSON.stringify({
+      input_id: input.id, input_name: input.name, changes: window.fixtureChanges,
+      selected_files: Array.from(input.files).map(file => ({name:file.name,size:file.size,type:file.type})),
+      stages: {file_selected:true,upload_started:false,server_received:false,platform_processed:false}
+    }, null, 2);
+  });
+}
+document.querySelector('#clear').addEventListener('click', () => {
+  for (const input of document.querySelectorAll('input[type="file"]')) input.value='';
+  document.querySelector('#result').textContent='No file selected';
+});
+</script>
+</html>

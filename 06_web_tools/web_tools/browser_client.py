@@ -13,7 +13,13 @@ class BrowserBridgeError(RuntimeError):
 
 
 class BrowserBridgeClient:
-    """Small authenticated client used by the MCP process to reach the user session."""
+    """Authenticated facade from MCP to the existing interactive user session.
+
+    Native Named Pipe discovery lives in that session's bridge, where LOCALAPPDATA
+    and the protected discovery files belong to the logged-in user. The MCP
+    Windows service must not guess another user's profile or copy IPC tokens.
+    Edge continues to use the same extension transport behind this facade.
+    """
 
     def __init__(self, settings: Settings):
         self.base_url = settings.browser_bridge_url.rstrip("/")
@@ -51,6 +57,22 @@ class BrowserBridgeClient:
             detail = body.get("detail") if isinstance(body, dict) else body
             raise BrowserBridgeError(str(detail or f"Browser bridge HTTP {response.status_code}"))
         return body
+
+    async def browser_instances(self, timeout: int = 10_000) -> dict[str, Any]:
+        """Discover existing instances, with verified v72 native IPC preferred."""
+        return await self.call("/v1/browsers", {"timeout": timeout}, timeout / 1000 + 5)
+
+    async def browser_control(self, browser_id: str, action: str, tab_id: str | None = None,
+                              arguments: dict[str, Any] | None = None, operation_id: str | None = None,
+                              confirm: bool = False, timeout: int = 30_000) -> dict[str, Any]:
+        """Dispatch to an explicit browser; task_status recovers a native task ID.
+
+        The bridge waits for native asynchronous tasks and never falls back to
+        an extension after an IPC operation may have entered the browser queue.
+        """
+        return await self.call("/v1/browser/dispatch", {"browser_id": browser_id,
+            "action": action, "tab_id": tab_id, "arguments": arguments,
+            "operation_id": operation_id, "confirm": confirm, "timeout": timeout}, timeout / 1000 + 5)
 
     async def list_tabs(self) -> dict[str, Any]:
         return await self.call("/v1/tabs")
@@ -179,6 +201,17 @@ class BrowserBridgeClient:
 
     async def wait(self, tab_id: str, milliseconds: int = 1000) -> dict[str, Any]:
         return await self.call("/v1/tabs/wait", {"tab_id": tab_id, "milliseconds": milliseconds}, milliseconds / 1000 + 5)
+
+    async def upload_file(self, tab_id: str, selector: str, file_path: str, confirm: bool = False,
+                          timeout: int = 30_000, idempotency_key: str = "") -> dict[str, Any]:
+        """Select validated media in an observed Edge input; not a platform receipt."""
+        return await self.call("/v1/tabs/upload_file", {"tab_id": tab_id, "selector": selector,
+            "file_path": file_path, "confirm": confirm, "timeout": timeout,
+            "idempotency_key": idempotency_key}, timeout / 1000 + 20)
+
+    async def upload_status(self, idempotency_key: str) -> dict[str, Any]:
+        """Read the durable receipt without selecting or resending any file."""
+        return await self.call("/v1/tabs/upload_status", {"idempotency_key": idempotency_key})
 
     async def screenshot(self, tab_id: str, full_page: bool = False) -> dict[str, Any]:
         return await self.call("/v1/tabs/screenshot", {"tab_id": tab_id, "full_page": full_page})

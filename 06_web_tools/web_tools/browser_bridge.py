@@ -18,7 +18,12 @@ from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, StrictBool, StrictInt
+
+from .browser_upload import UploadService, UploadError
+from .unified_browser import UnifiedBrowserService, WIRE
+from .browser_process_identity import identify_existing_browser_peer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -207,6 +212,32 @@ class WaitRequest(TabRequest):
 
 class ScreenshotRequest(TabRequest):
     full_page: bool = False
+
+
+class UploadFileRequest(TabRequest):
+    selector: str = Field(min_length=1, max_length=1000)
+    file_path: str = Field(min_length=1, max_length=4000)
+    confirm: StrictBool = False
+    timeout: int = Field(default=30_000, ge=1000, le=120_000)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class BrowserInstancesRequest(BaseModel):
+    timeout: StrictInt = Field(default=10_000, ge=500, le=30_000)
+
+
+class BrowserControlRequest(BaseModel):
+    browser_id: str = Field(min_length=8, max_length=160)
+    action: str = Field(min_length=1, max_length=40)
+    tab_id: str | None = Field(default=None, max_length=128)
+    arguments: dict[str, Any] | None = None
+    operation_id: str | None = Field(default=None, max_length=160)
+    confirm: StrictBool = False
+    timeout: StrictInt = Field(default=30_000, ge=500, le=120_000)
+
+
+class UploadStatusRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=128)
 
 
 def _validate_url(url: str | None) -> str | None:
@@ -430,9 +461,13 @@ class EdgeExtensionBridge:
         self._websocket: WebSocket | None = None
         self._connection_id: str | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._native_browser_adapter = None
         self._state_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._connected_at: str | None = None
+        self._connections: dict[str, dict[str, Any]] = {}
+        self._pending_connections: dict[str, str | None] = {}
+        self._tab_connections: dict[str, str | None] = {}
 
     @property
     def connected(self) -> bool:
@@ -441,22 +476,24 @@ class EdgeExtensionBridge:
     async def attach(self, websocket: WebSocket) -> None:
         await websocket.accept()
         connection_id = uuid.uuid4().hex
+        peer_identity = None
+        if websocket.client is not None:
+            peer_identity = await asyncio.to_thread(identify_existing_browser_peer,
+                str(websocket.client.host), int(websocket.client.port))
         async with self._state_lock:
-            old = self._websocket
             self._websocket = websocket
             self._connection_id = connection_id
             self._connected_at = str(asyncio.get_running_loop().time())
-        if old is not None:
-            try:
-                await old.close(code=4001, reason="replaced by a newer Edge extension connection")
-            except Exception:
-                pass
+            # An extension installed in another Chromium browser must not evict
+            # Edge. Explicit tab ids are routed only to their observed socket.
+            self._connections[connection_id] = {"websocket": websocket, "browser_family": "unknown",
+                "process_identity": peer_identity}
         logger.info("edge_extension_connected connection_id=%s", connection_id)
-        await self._send({"type": "hello", "server": "xiaoruo1", "version": "2.0.0"})
+        await self._send({"type": "hello", "server": "xiaoruo1", "version": "2.0.0"}, websocket)
         try:
             while True:
                 message = await websocket.receive_json()
-                await self._receive(message)
+                await self._receive(message, connection_id)
         except WebSocketDisconnect:
             pass
         except Exception as exc:
@@ -466,22 +503,27 @@ class EdgeExtensionBridge:
 
     async def detach(self, websocket: WebSocket, connection_id: str | None = None) -> None:
         async with self._state_lock:
-            if websocket is not self._websocket:
-                return
-            if connection_id is not None and connection_id != self._connection_id:
-                return
-            self._websocket = None
-            self._connection_id = None
-            self._connected_at = None
-            pending = list(self._pending.values())
-            self._pending.clear()
+            removed = connection_id
+            if removed is None:
+                removed = next((key for key, value in self._connections.items() if value["websocket"] is websocket), None)
+            if removed is not None:
+                self._connections.pop(removed, None)
+            if websocket is self._websocket:
+                latest = next(reversed(self._connections), None)
+                self._connection_id = latest
+                self._websocket = self._connections[latest]["websocket"] if latest else None
+                if latest is None:
+                    self._connected_at = None
+            doomed = [key for key, value in self._pending_connections.items() if value == removed]
+            pending = [self._pending.pop(key) for key in doomed if key in self._pending]
+            self._tab_connections = {key: value for key, value in self._tab_connections.items() if value != removed}
         for future in pending:
             if not future.done():
                 future.set_exception(BrowserBridgeError("Edge 扩展桥接已断开"))
         logger.info("edge_extension_disconnected")
 
-    async def _send(self, message: dict[str, Any]) -> None:
-        websocket = self._websocket
+    async def _send(self, message: dict[str, Any], websocket: WebSocket | None = None) -> None:
+        websocket = websocket or self._websocket
         if websocket is None:
             raise BrowserBridgeError("Edge 扩展未连接。请先在日常 Edge 中加载并启用 Xiaoruo1 Edge Bridge 扩展")
         async with self._send_lock:
@@ -490,39 +532,183 @@ class EdgeExtensionBridge:
             except Exception as exc:
                 raise BrowserBridgeError("无法向 Edge 扩展发送指令") from exc
 
-    async def _receive(self, message: Any) -> None:
+    async def _receive(self, message: Any, connection_id: str | None = None) -> None:
         if not isinstance(message, dict):
             return
         if message.get("type") == "hello_ack":
+            if connection_id in self._connections:
+                family = message.get("browser_family")
+                self._connections[connection_id]["browser_family"] = family if family in {"edge", "chromium-other"} else "unknown"
+                info = self._connections[connection_id]
+                try:
+                    stable = str(uuid.UUID(str(message.get("instance_id", ""))))
+                except (ValueError, TypeError, AttributeError):
+                    stable = None
+                info["instance_id"] = stable
+                kind = message.get("browser_kind")
+                info["browser_kind"] = kind if kind in {"edge", "xiaoruo_browser", "chromium_other"} else ("edge" if family == "edge" else "chromium_other")
+                supported = message.get("supported_actions", [])
+                info["supported_actions"] = [item for item in supported if isinstance(item, str) and item in WIRE] if isinstance(supported, list) else []
+                info["version"] = str(message.get("version", "unknown"))[:40]
+                fallback = info.get("process_identity")
+                if not stable and fallback:
+                    info.update(fallback)
+
             logger.info("edge_extension_ready version=%s", message.get("version", "unknown"))
             return
         request_id = str(message.get("id", ""))
+        if connection_id is not None and self._pending_connections.get(request_id) != connection_id:
+            return
         future = self._pending.get(request_id)
         if future is None:
             return
         if not future.done():
             future.set_result(message)
 
-    async def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
+    async def call(self, method: str, params: dict[str, Any] | None = None, timeout: float = 30.0,
+                   _connection_id: str | None = None) -> Any:
         if self._websocket is None:
             raise BrowserBridgeError("Edge 扩展未连接。请先在日常 Edge 中加载并启用 Xiaoruo1 Edge Bridge 扩展")
         request_id = uuid.uuid4().hex
+        connection_id = _connection_id
+        explicit_tab = str((params or {}).get("tab_id") or "")
+        if connection_id is None and explicit_tab and self._connections and explicit_tab not in self._tab_connections:
+            await self.list_tabs()
+            if explicit_tab not in self._tab_connections:
+                raise BrowserBridgeError("Explicit tab is absent after browser reconnection; discover and observe it again")
+        if connection_id is None and explicit_tab in self._tab_connections:
+            connection_id = self._tab_connections[explicit_tab]
+            if connection_id is None:
+                raise BrowserBridgeError("Browser tab id is ambiguous across extension connections; inspect the browser tabs")
+        connection_id = connection_id or self._connection_id
+        if self._connections and connection_id not in self._connections:
+            raise BrowserBridgeError("Selected browser connection expired; no fallback browser was used")
+        selected_socket = self._connections.get(connection_id or "", {}).get("websocket", self._websocket)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
+        self._pending_connections[request_id] = connection_id
         try:
-            await self._send({"id": request_id, "method": method, "params": params or {}})
+            await self._send({"id": request_id, "method": method, "params": params or {}}, selected_socket)
             response = await asyncio.wait_for(future, timeout=max(1.0, timeout))
         except asyncio.TimeoutError as exc:
             raise BrowserBridgeError(f"Edge 扩展执行超时: {method}") from exc
         finally:
             self._pending.pop(request_id, None)
+            self._pending_connections.pop(request_id, None)
         if not response.get("ok", False):
             raise BrowserBridgeError(str(response.get("error") or f"Edge 扩展执行失败: {method}"))
         return response.get("result")
 
     async def list_tabs(self) -> dict[str, Any]:
-        result = await self.call("list_tabs")
-        return {"browser": "edge-extension", "tabs": result.get("tabs", []) if isinstance(result, dict) else result}
+        if not self._connections:
+            result = await self.call("list_tabs")
+            return {"browser": "edge-extension", "tabs": result.get("tabs", []) if isinstance(result, dict) else result}
+        tabs: list[dict[str, Any]] = []
+        mapping: dict[str, str | None] = {}
+        for connection_id, info in list(self._connections.items()):
+            try:
+                result = await self.call("list_tabs", _connection_id=connection_id, timeout=10)
+            except BrowserBridgeError:
+                continue
+            family = result.get("browser_family", info.get("browser_family", "unknown")) if isinstance(result, dict) else "unknown"
+            for item in result.get("tabs", []) if isinstance(result, dict) else []:
+                entry = {**item, "browser_family": family, "connection_id": connection_id}
+                tab_id = str(item.get("tab_id", item.get("id", "")))
+                mapping[tab_id] = None if tab_id in mapping else connection_id
+                tabs.append(entry)
+        self._tab_connections = mapping
+        return {"browser": "edge-extension", "tabs": tabs}
+
+    def native_browser_adapter(self):
+        if os.getenv("WEB_AGENT_NATIVE_BROWSER_IPC_ENABLED", "true").strip().lower() in {"0", "false", "off", "no"}:
+            return None
+        if self._native_browser_adapter is None:
+            from .xiaoruo_browser_adapter import NativeXiaoruoBrowserAdapter
+            self._native_browser_adapter = NativeXiaoruoBrowserAdapter(data_root=DATA_ROOT)
+        return self._native_browser_adapter
+
+    async def browser_instances(self) -> dict[str, Any]:
+        browsers = []
+        native = self.native_browser_adapter()
+        if native is not None:
+            try:
+                inventory = await native.native_instances(timeout=5)
+                browsers.extend({**item, "preferred": True} for item in inventory.get("browsers", []))
+            except Exception:
+                # Neither discovery secrets nor exception strings belong in logs.
+                logger.info("native_browser_discovery_unavailable")
+        native_pids = {item.get("native_pid") for item in browsers}
+
+        for connection_id, info in list(self._connections.items()):
+            stable = info.get("instance_id")
+            browser_id = "browser_" + stable if stable else "legacy_" + connection_id
+            browsers.append({"browser_id": browser_id, "connection_generation": connection_id,
+                "browser_kind": info.get("browser_kind", "chromium_other"),
+                "browser_family": info.get("browser_family", "unknown"),
+                "connected": True, "stable_identity": bool(stable),
+                "supported_actions": info.get("supported_actions", []) if stable else ["status", "list_tabs", "read"],
+                "version": info.get("version", "unknown"), "adapter": "authenticated_extension",
+                "identity_source": info.get("identity_source", "extension_storage" if stable else "legacy_unknown"),
+                "manual_instance": info.get("manual_instance"), "engine": info.get("engine", "chromium"),
+                "limitations": info.get("limitations", []),
+                "compatibility_adapter": info.get("browser_kind") == "xiaoruo_browser",
+                "preferred": not (info.get("process_id") in native_pids),
+                "superseded_by_native": info.get("process_id") in native_pids})
+        return {"ok": True, "status": "completed", "browsers": browsers}
+
+    async def browser_dispatch(self, browser_id: str, generation: str, method: str,
+                               payload: dict[str, Any], timeout: float) -> Any:
+        # Native identity is never redirected to an extension, even on busy/timeout.
+        if browser_id.startswith("native_"):
+            native = self.native_browser_adapter()
+            if native is None:
+                raise BrowserBridgeError("Native browser IPC is explicitly disabled")
+            return await native.native_dispatch(browser_id, generation, method, payload, timeout)
+        # Resolve by BOTH identities. Never fall back to the newest connection.
+        candidates = [(key, info) for key, info in self._connections.items()
+            if ("browser_" + str(info.get("instance_id")) if info.get("instance_id") else "legacy_" + key) == browser_id
+            and key == generation]
+        if len(candidates) != 1:
+            raise BrowserBridgeError("Selected browser connection is absent or ambiguous")
+        connection_id, _ = candidates[0]
+        value = await self.call(method, payload, timeout, _connection_id=connection_id)
+        if method in {"screenshot", "debug_screenshot"}:
+            if not isinstance(value, dict):
+                raise BrowserBridgeError("Browser did not return a screenshot object")
+            encoded = value.get("data_url")
+            if not isinstance(encoded, str) or not encoded.startswith("data:image/png;base64,") or len(encoded) > 24 * 1024 * 1024:
+                raise BrowserBridgeError("Browser screenshot is invalid or oversized")
+            try:
+                body = base64.b64decode(encoded.split(",", 1)[1], validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise BrowserBridgeError("Browser screenshot encoding is invalid") from exc
+            if not body.startswith(b"\x89PNG\r\n\x1a\n") or len(body) > 16 * 1024 * 1024:
+                raise BrowserBridgeError("Browser did not return a bounded PNG")
+            destination = SCREENSHOT_ROOT / ("unified-" + uuid.uuid4().hex + ".png")
+            destination.write_bytes(body)
+            return {"tab_id": payload.get("tab_id"), "path": str(destination),
+                "mime_type": "image/png", "size_bytes": len(body), "url": str(value.get("url", "")),
+                "full_page": value.get("full_page") is True, "verified": True}
+        return value
+
+    async def upload_desktop_preflight(self) -> None:
+        from web_config.settings import Settings
+        from .windows_mcp import WindowsMCPBridge, interactive_desktop_state
+        native = interactive_desktop_state()
+        if not native.get("available"):
+            raise UploadError(str(native.get("error_code") or "upload_desktop_unavailable"), "An unlocked active user desktop is required")
+        desktop = WindowsMCPBridge(Settings.load())
+        try:
+            result = await asyncio.wait_for(desktop.call("ControlStatus", {}), timeout=8)
+            data = result.get("result", {}).get("data")
+            if isinstance(data, str):
+                data = json.loads(data)
+            if not isinstance(data, dict):
+                data = json.loads(result.get("result", {}).get("summary") or "{}")
+            if not result.get("ok") or data.get("state") not in {"ready", "ai"}:
+                raise UploadError("upload_desktop_control_unavailable", "Desktop is under user control or unavailable; wait and inspect before uploading")
+        finally:
+            await desktop.close()
 
     async def list_downloads(self, request: DownloadListRequest) -> dict[str, Any]:
         try:
@@ -880,6 +1066,8 @@ class EdgeExtensionBridge:
 
 
 bridge = EdgeExtensionBridge()
+uploads = UploadService(DATA_ROOT / "browser_upload_receipts.sqlite3")
+unified = UnifiedBrowserService(DATA_ROOT / "unified_browser_receipts.sqlite3", bridge.browser_instances, bridge.browser_dispatch, bridge.upload_desktop_preflight)
 
 
 def require_bridge_token(value: str | None = Header(default=None, alias="X-Xiaoruo1-Browser-Token")) -> None:
@@ -890,9 +1078,9 @@ def require_bridge_token(value: str | None = Header(default=None, alias="X-Xiaor
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     yield
-    if bridge._websocket is not None:
+    for info in list(bridge._connections.values()):
         try:
-            await bridge._websocket.close(code=1001, reason="server shutdown")
+            await info["websocket"].close(code=1001, reason="server shutdown")
         except Exception:
             pass
 
@@ -922,6 +1110,21 @@ async def health() -> dict[str, Any]:
         "port": PORT,
         "extension_connected": bridge.connected,
     }
+
+
+@app.get("/v1/browsers", dependencies=[Depends(require_bridge_token)])
+async def browser_instances_get() -> dict[str, Any]:
+    return await unified.instances()
+
+
+@app.post("/v1/browsers", dependencies=[Depends(require_bridge_token)])
+async def browser_instances_post(body: BrowserInstancesRequest) -> dict[str, Any]:
+    return await unified.instances(body.timeout)
+
+
+@app.post("/v1/browser/dispatch", dependencies=[Depends(require_bridge_token)])
+async def browser_dispatch(body: BrowserControlRequest) -> dict[str, Any]:
+    return await unified.control(**body.model_dump())
 
 
 @app.post("/v1/tabs", dependencies=[Depends(require_bridge_token)])
@@ -991,6 +1194,26 @@ async def select_option(body: SelectRequest) -> dict[str, Any]:
         return await bridge.select_option(body)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/tabs/upload_file", dependencies=[Depends(require_bridge_token)])
+async def upload_file(body: UploadFileRequest) -> dict[str, Any]:
+    return await uploads.upload(**body.model_dump(), list_tabs=bridge.list_tabs,
+                                dispatch=bridge.call, desktop_check=bridge.upload_desktop_preflight)
+
+
+@app.post("/v1/tabs/upload_status", dependencies=[Depends(require_bridge_token)])
+async def upload_status(body: UploadStatusRequest) -> dict[str, Any]:
+    return uploads.status(body.idempotency_key)
+
+
+@app.get("/upload-test/fixture.html")
+async def upload_fixture() -> FileResponse:
+    # One fixed test HTML file only. No arbitrary file route or static mount.
+    path = PROJECT_ROOT / "10_web_deploy" / "validation_runs" / "bilibili-web-upload-20261027" / "fixture.html"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Upload fixture not installed")
+    return FileResponse(path, media_type="text/html", headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; script-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; form-action 'none'; frame-ancestors 'none'"})
 
 
 @app.post("/v1/tabs/wait", dependencies=[Depends(require_bridge_token)])

@@ -35,3 +35,5 @@ skill_imports_*/
 md_auto_stage/
 .DS_Store
 Thumbs.db
+
+10_web_deploy/staging/
