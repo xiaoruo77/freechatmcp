@@ -6,9 +6,16 @@ Open-source bridge that lets a supported web-chat AI client control a local Wind
 
 This is not an API bypass, a way to obtain unlimited AI calls, or a zero-cost guarantee. It uses supported client-side integration and user-authorized tool calls.
 
-## v0.2.0 — Browser control and upload
+## v0.3.0 — Windows background workspace and verifiable actions
 
-New support for unified browser operations, Windows native IPC, file upload workflows and accompanying tests. This release retains the original MCP tool interfaces and excludes local credentials, runtime state, and browser binaries.
+**Latest release:** [FreeChatMCP v0.3.0 — release notes and source downloads](https://github.com/xiaoruo77/freechatmcp/releases/tag/v0.3.0). The features below are in the tagged release. To use them, download the release source or check out `v0.3.0`; the default branch does not yet include the v0.3.0 implementation. For setup, use the [README for v0.3.0](https://github.com/xiaoruo77/freechatmcp/blob/v0.3.0/README.md).
+
+- **Optional background desktop** for supported Windows applications. Separate Edge instances and supported UI Automation controls reduce interference with the user's foreground. WPS Writer uses a private window and verifies edits and Save As; no promise is made for all applications, GPU surfaces, Office variants or Windows installations.
+- **Better browser operation receipts.** Navigation, downloads, forms and uploads distinguish dispatch, pending/uncertain state and observed results. Look up the receipt before retrying an operation.
+- **Python and Notebook isolation.** Choose a configured interpreter for each project and run notebooks in a separate kernel. The input notebook is never overwritten by the notebook executor. User code can still have side effects.
+- **Evidence-based host/worker coordination.** Persist the goal, checkpoints and explicit acceptance; reread actual worker output; do not turn an uncertain effect into success or reissue it automatically.
+
+[v0.2.0](https://github.com/xiaoruo77/freechatmcp/releases/tag/v0.2.0) introduced unified browser control, native IPC and uploads. [v0.1.0](https://github.com/xiaoruo77/freechatmcp/releases/tag/v0.1.0) is the original connection/deployment snapshot.
 
 ## Components
 
