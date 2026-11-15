@@ -2,21 +2,29 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>FreeChatMCP Edge Bridge</title>
+  <title>Xiaoruo1 Edge Bridge</title>
   <style>
-    body { width: 260px; margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
+    body { width: 310px; margin: 0; padding: 16px; font: 14px/1.5 system-ui, sans-serif; color: #1f2937; }
     h1 { margin: 0 0 10px; font-size: 16px; }
     #status { padding: 10px; border-radius: 8px; background: #f3f4f6; }
     .on { color: #15803d; } .off { color: #6b7280; }
+    #activity { margin-top: 12px; }
+    .activity-title { font-weight: 650; margin-bottom: 6px; }
+    .item { padding: 8px 10px; margin-top: 6px; border-radius: 8px; background: #eff6ff; font-size: 13px; }
+    .item.needs_check { background: #fffbeb; color: #92400e; }
+    .item.completed { background: #f0fdf4; color: #166534; }
+    .detail { display: block; margin-top: 2px; color: #475569; overflow-wrap: anywhere; font-size: 12px; }
     button { margin-top: 12px; width: 100%; padding: 8px; border: 0; border-radius: 7px; background: #2563eb; color: white; cursor: pointer; }
     small { display: block; margin-top: 10px; color: #6b7280; }
   </style>
 </head>
 <body>
-  <h1>FreeChatMCP Edge Bridge</h1>
+  <h1>Xiaoruo1 Edge Bridge</h1>
   <div id="status">检查连接中…</div>
+  <div id="activity" aria-live="polite"></div>
   <button id="reconnect">重新连接</button>
-  <small>仅通过 127.0.0.1 连接本机 MCP；不会读取或导出 Cookie。</small>
+  <small>操作时显示“运行”角标，目标网页右上角显示提示。提示不接收鼠标键盘，结束后自动消失。</small>
+  <small>仅通过 127.0.0.1 连接本机 MCP；不会读取或导出 Cookie。<span id="version"></span></small>
   <script src="popup.js"></script>
 </body>
 </html>

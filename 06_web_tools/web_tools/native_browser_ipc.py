@@ -27,11 +27,40 @@ from .browser_process_identity import XIAORUO_EXE
 PROTOCOL = "xiaoruo-browser-control/1.0"
 MCP_PROTOCOL = "2025-11-25"
 MAX_REQUEST = 1024 * 1024
+# A capability-checked upload adapter may send a 32 MiB file as Base64. The
+# ordinary tool limit stays small; v73 itself permits 96 MiB per request.
+MAX_UPLOAD_REQUEST = 48 * 1024 * 1024
 MAX_RESPONSE = 32 * 1024 * 1024
 _PIPE = re.compile(r"\\\\\.\\pipe\\xiaoruo-browser-([1-9][0-9]*)-([0-9a-fA-F-]{36})\Z")
 _FILE = re.compile(r"browser-([1-9][0-9]*)-([0-9]+)\.json\Z")
 _TERMINAL = {"succeeded", "failed", "timed_out", "cancelled"}
 _LOCKS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_DISCOVERY_ATTEMPTS = 3
+_DISCOVERY_RETRY_DELAY = .025
+_DISCOVERY_RETRY_BUDGET = .15
+
+
+class _DiscoveryReadError(ValueError):
+    def __init__(self, code: str, *, retryable: bool = False):
+        super().__init__(code)
+        self.code, self.retryable = code, retryable
+
+
+def _discovery_error(error: Exception) -> tuple[str, bool]:
+    """Return only controlled codes; OS/JSON exception text may contain secrets."""
+    if isinstance(error, _DiscoveryReadError):
+        return error.code, error.retryable
+    if isinstance(error, FileNotFoundError):
+        return "discovery_missing", True
+    if isinstance(error, PermissionError):
+        return "discovery_access_denied", False
+    if isinstance(error, OSError):
+        return "discovery_io_error", False
+    if isinstance(error, (json.JSONDecodeError, UnicodeError)):
+        return "discovery_invalid_json", True
+    if isinstance(error, ValueError):
+        return "discovery_unsafe_or_invalid", False
+    return "discovery_inspection_failed", False
 
 
 class NativeIPCError(RuntimeError):
@@ -75,7 +104,7 @@ def _no_reparse(path: Path) -> None:
     for parent in (path, *path.parents):
         info = parent.lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
-            raise ValueError("discovery reparse point")
+            raise _DiscoveryReadError("discovery_reparse_point")
 
 
 def _identity(info: os.stat_result) -> tuple:
@@ -100,14 +129,20 @@ def _read_discovery(path: Path) -> tuple[dict, tuple, float]:
     _no_reparse(path)
     before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_size > 65536:
-        raise ValueError("invalid discovery file")
+        raise _DiscoveryReadError("discovery_invalid_file")
     # OPEN_REPARSE_POINT prevents following a substituted Windows symlink.
     if os.name == "nt":
         import msvcrt
         api = _kernel()
-        handle = api.CreateFileW(str(path), 0x80000000, 1, None, 3, 0x00200000, None)
+        # Do not deny the publisher's write/delete access while reading. All
+        # identity, size and reparse checks still run before/after this read.
+        handle = api.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x00200000, None)
         if handle == ctypes.c_void_p(-1).value:
-            raise ValueError("unreadable discovery")
+            error = ctypes.get_last_error()
+            code = {2: "discovery_missing", 3: "discovery_missing",
+                    5: "discovery_access_denied", 32: "discovery_sharing_violation",
+                    33: "discovery_lock_violation"}.get(error, "discovery_io_error")
+            raise _DiscoveryReadError(code, retryable=error in {2, 3, 32, 33})
         try:
             descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
         except BaseException:
@@ -118,15 +153,28 @@ def _read_discovery(path: Path) -> tuple[dict, tuple, float]:
     with os.fdopen(descriptor, "rb") as stream:
         opened = os.fstat(stream.fileno())
         if _identity(before) != _identity(opened):
-            raise ValueError("discovery changed")
+            raise _DiscoveryReadError("discovery_changed", retryable=True)
         raw = stream.read(65537)
     _no_reparse(path)
     if len(raw) > 65536 or _identity(before) != _identity(path.lstat()):
-        raise ValueError("discovery changed")
+        raise _DiscoveryReadError("discovery_changed", retryable=True)
     value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
     if not isinstance(value, dict):
-        raise ValueError("invalid discovery")
+        raise _DiscoveryReadError("discovery_invalid_json")
     return value, _identity(before), getattr(before, "st_birthtime", before.st_ctime)
+
+
+def _read_discovery_retry(path: Path, *, deadline: float) -> tuple[dict, tuple, float]:
+    """Retry only read-only discovery snapshots, never authentication or tasks."""
+    for attempt in range(_DISCOVERY_ATTEMPTS):
+        try:
+            return _read_discovery(path)
+        except Exception as error:
+            remaining = deadline - time.monotonic()
+            if (not _discovery_error(error)[1] or attempt + 1 == _DISCOVERY_ATTEMPTS
+                    or remaining <= 0):
+                raise
+            time.sleep(min(_DISCOVERY_RETRY_DELAY, remaining))
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,21 +238,40 @@ class NativeBrowserDiscovery:
         if psutil_api is None:
             import psutil as psutil_api
         self._process_api = psutil_api
+        # Codes and validated PIDs only: never discovery contents, OS exception
+        # text, authentication material, or a private pipe address.
+        self.last_diagnostics: list[dict[str, Any]] = []
+
+    def _reject(self, code: str, pid: int | None = None) -> None:
+        item: dict[str, Any] = {"code": code}
+        if type(pid) is int and pid > 0:
+            item["process_id"] = pid
+        self.last_diagnostics.append(item)
 
     def discover(self) -> list[NativeBrowserInstance]:
+        self.last_diagnostics = []
         if self.root is None or not self.root.is_absolute() or not self.trusted_executable.is_absolute():
+            self._reject("discovery_invalid_configuration")
             return []
         try:
             _no_reparse(self.root)
             files = list(self.root.glob("browser-*.json"))[:256]
-        except (OSError, ValueError):
+        except Exception as error:
+            code, _ = _discovery_error(error)
+            self._reject("discovery_root_missing" if code == "discovery_missing" else code)
             return []
+        if not files:
+            self._reject("discovery_no_files")
         found = []
+        retry_deadline = time.monotonic() + _DISCOVERY_RETRY_BUDGET
         for path in files:
+            pid = None
             try:
-                data, identity, birth = _read_discovery(path)
+                data, identity, birth = _read_discovery_retry(path, deadline=retry_deadline)
                 pid = data.get("pid")
-                match, pipe = _FILE.fullmatch(path.name), _PIPE.fullmatch(data.get("pipeName", ""))
+                match = _FILE.fullmatch(path.name)
+                pipe_name = data.get("pipeName")
+                pipe = _PIPE.fullmatch(pipe_name) if isinstance(pipe_name, str) else None
                 if (data.get("schema") != "xiaoruo-browser-control-discovery/1"
                         or data.get("product") != "xiaoruo-browser" or data.get("protocol") != PROTOCOL
                         or data.get("mcpProtocol") not in {MCP_PROTOCOL, "2025-06-18", "2025-03-26", "2024-11-05"}
@@ -215,21 +282,34 @@ class NativeBrowserDiscovery:
                         or not isinstance(data.get("executable"), str) or not Path(data["executable"]).is_absolute()
                         or not isinstance(data.get("permissions"), list)
                         or any(not isinstance(item, str) for item in data["permissions"])):
+                    self._reject("discovery_invalid_record", pid)
                     continue
                 uuid.UUID(pipe[2])
                 process = self._process_api.Process(pid)
                 created = process.create_time()
                 expected = _path(self.trusted_executable)
-                if (not process.is_running() or _path(process.exe()) != expected
-                        or _path(data["executable"]) != expected or birth + 2 < created
-                        or any(str(arg).casefold().startswith("--mcp-stdio") for arg in process.cmdline())):
+                if not process.is_running():
+                    self._reject("discovery_process_not_running", pid)
+                    continue
+                if _path(process.exe()) != expected or _path(data["executable"]) != expected:
+                    self._reject("discovery_executable_mismatch", pid)
+                    continue
+                if birth + 2 < created:
+                    self._reject("discovery_predates_process", pid)
+                    continue
+                if any(str(arg).casefold().startswith("--mcp-stdio") for arg in process.cmdline()):
+                    self._reject("discovery_stdio_process", pid)
                     continue
                 found.append(NativeBrowserInstance(pid, data["instanceId"], str(self.trusted_executable),
                     tuple(data["permissions"]), created, data["pipeName"], data["authToken"], path,
                     identity, expected, self._process_api))
-            except Exception:
-                # Missing, stale, hostile, or access-denied discovery is never
-                # reported with file contents or a guessed process identity.
+            except Exception as error:
+                code, _ = _discovery_error(error)
+                # psutil exception messages may contain arbitrary process text.
+                code = {"AccessDenied": "discovery_process_access_denied",
+                        "NoSuchProcess": "discovery_process_missing",
+                        "ZombieProcess": "discovery_process_not_running"}.get(type(error).__name__, code)
+                self._reject(code, pid)
                 continue
         return sorted(found, key=lambda item: (item.pid, item.instance_id))
 
@@ -425,7 +505,7 @@ class _Session:
                 await asyncio.shield(task)
             raise
 
-    async def rpc(self, method, params=None, *, notification=False):
+    async def rpc(self, method, params=None, *, notification=False, _upload_request=False):
         self.write_started = False
         request = {"jsonrpc": "2.0", "method": method}
         if params is not None:
@@ -437,8 +517,12 @@ class _Session:
             raw = json.dumps(request, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
         except (ValueError, TypeError, UnicodeError):
             raise NativeIPCError("invalid_argument", "IPC arguments must be valid JSON") from None
-        if len(raw) > MAX_REQUEST:
-            raise NativeIPCError("native_ipc_limit", "Local browser request exceeds 1 MiB")
+        upload = (_upload_request is True and method == "tools/call" and isinstance(params, dict)
+                  and params.get("name") == "xiaoruo_browser_start_task"
+                  and isinstance(params.get("arguments"), dict)
+                  and params["arguments"].get("action") == "upload_file")
+        if len(raw) > (MAX_UPLOAD_REQUEST if upload else MAX_REQUEST):
+            raise NativeIPCError("native_ipc_limit", "Local browser request exceeds the size limit")
         self.write_started = True
         await self._blocking(self.transport.write, raw, self.deadline)
         if notification:
@@ -476,10 +560,11 @@ class _Session:
             raise NativeIPCError("native_ipc_protocol", "Local browser MCP protocol is incompatible")
         await self.rpc("notifications/initialized", notification=True)
 
-    async def call_tool(self, name: str, arguments: dict | None = None):
+    async def call_tool(self, name: str, arguments: dict | None = None, *, _upload_request=False):
         if not isinstance(name, str) or not isinstance(arguments if arguments is not None else {}, dict):
             raise NativeIPCError("invalid_argument", "A native tool name and argument object are required")
-        result = await self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        result = await self.rpc("tools/call", {"name": name, "arguments": arguments or {}},
+                                _upload_request=_upload_request)
         if not isinstance(result, dict):
             raise NativeIPCError("native_ipc_protocol", "Local browser returned an invalid tool result")
         structured = result.get("structuredContent")
@@ -566,26 +651,43 @@ class NativeBrowserClient:
     async def capabilities(self, timeout: float = 30):
         return (await self.call_tool("xiaoruo_browser_capabilities", timeout=timeout))["structured"]
 
-    async def execute(self, action: str, arguments: dict | None = None, timeout: float = 30):
+    async def execute(self, action: str, arguments: dict | None = None, timeout: float = 30,
+                      *, _allow_upload_request=False):
         if not isinstance(action, str) or not action or not isinstance(arguments if arguments is not None else {}, dict):
             return NativeIPCError("invalid_argument", "A native action and argument object are required").as_result()
+        args = dict(arguments or {})
+        requested_timeout = args.get("timeout_ms")
+        if "timeout_ms" in args and (type(requested_timeout) is not int or not 1000 <= requested_timeout <= 120000):
+            return NativeIPCError("invalid_argument", "Native task timeout_ms must be an integer from 1000 to 120000").as_result()
         task_id, submitted, session = None, False, None
         try:
             async with self.session(timeout) as session:
-                args = dict(arguments or {})
-                args["action"] = action
-                args.setdefault("timeout_ms", max(1000, min(120000, int(_remaining(session.deadline) * 1000))))
                 session.write_started = False
-                response = await session.call_tool("xiaoruo_browser_start_task", args)
+                remaining = _remaining(session.deadline)
+                # Leave time for a final status poll and its response inside the
+                # original IPC deadline, including when the native task expires.
+                budget_ms = min(120000, int((remaining - min(1.0, remaining * .2)) * 1000))
+                if budget_ms < 1000:
+                    raise _timeout()
+                args["action"] = action
+                args["timeout_ms"] = min(requested_timeout or 120000, budget_ms)
+                response = await session.call_tool("xiaoruo_browser_start_task", args,
+                    _upload_request=_allow_upload_request is True and action == "upload_file")
                 submitted = True
                 structured = response["structured"]
                 task = structured.get("task")
+                if isinstance(task, dict):
+                    candidate = task.get("id") or task.get("taskId") or task.get("task_id")
+                    if isinstance(candidate, str) and candidate and len(candidate) <= 256:
+                        task_id = candidate
                 if response["is_error"] or not isinstance(task, dict):
-                    return {"ok": False, "status": "failed", "error": {"code": "native_task_rejected",
+                    value = {"ok": False, "status": "failed", "error": {"code": "native_task_rejected",
                             "message": "Local browser rejected the task"}, "structured": structured,
                             "images": response["images"], "retryable": False}
-                task_id = task.get("id") or task.get("taskId") or task.get("task_id")
-                if not isinstance(task_id, str) or not task_id or len(task_id) > 256:
+                    if task_id:
+                        value["task_id"] = task_id
+                    return value
+                if task_id is None:
                     raise NativeIPCError("native_ipc_protocol", "Local browser returned no valid task ID", unknown=True)
                 while task.get("state") not in _TERMINAL:
                     if task.get("state") not in {"accepted", "running"}:

@@ -84,3 +84,4 @@ class Database:
             return json.loads(value)
         except json.JSONDecodeError:
             return default
+

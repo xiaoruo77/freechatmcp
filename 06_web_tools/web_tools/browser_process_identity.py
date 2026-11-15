@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 import uuid
 
-XIAORUO_EXE = Path(os.getenv("WEB_AGENT_BROWSER_EXE", str(Path.home() / "FreeChatMCP" / "xiaoruo-browser.exe")))
+XIAORUO_EXE = Path(os.environ.get("WEB_AGENT_XIAORUO_BROWSER_EXECUTABLE") or Path.home() / "AppData" / "Local" / "xiaoruo-browser" / "xiaoruo-browser.exe")
 LEGACY_ACTIONS = ["status", "list_tabs", "open_tab", "close_tab", "navigate", "read", "click", "type", "press", "select", "wait", "screenshot", "downloads"]
 
 

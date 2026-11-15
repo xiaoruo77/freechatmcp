@@ -11,6 +11,11 @@ from web_config.settings import Settings
 class BrowserBridgeError(RuntimeError):
     """Raised when the local user-session browser bridge cannot complete a call."""
 
+    def __init__(self, message: str, *, code="browser_bridge_error", retryable=True):
+        self.code = code
+        self.retryable = retryable
+        super().__init__(message)
+
 
 class BrowserBridgeClient:
     """Authenticated facade from MCP to the existing interactive user session.
@@ -29,9 +34,11 @@ class BrowserBridgeClient:
         try:
             token = self.token_file.read_text(encoding="utf-8").strip()
         except OSError as exc:
-            raise BrowserBridgeError("Browser bridge token is not available") from exc
+            raise BrowserBridgeError("Browser bridge token is not available",
+                code="browser_bridge_credentials_unavailable", retryable=False) from exc
         if not token:
-            raise BrowserBridgeError("Browser bridge token is empty")
+            raise BrowserBridgeError("Browser bridge token is empty",
+                code="browser_bridge_credentials_unavailable", retryable=False)
         return token
 
     async def call(self, endpoint: str, payload: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
@@ -43,23 +50,36 @@ class BrowserBridgeClient:
                 trust_env=False,
             ) as client:
                 response = await client.post(endpoint, json=payload or {})
+        except httpx.TimeoutException as exc:
+            raise BrowserBridgeError("浏览器请求等待超时；这不足以证明桥接断开。先检查当前标签和原操作回执，写操作不要直接重试。",
+                code="browser_response_timeout", retryable=True) from exc
         except (httpx.HTTPError, BrowserBridgeError) as exc:
             if isinstance(exc, BrowserBridgeError):
                 raise
             raise BrowserBridgeError(
                 "本机 Edge 扩展桥接未启动或未连接。请先启动 Xiaoruo1 Browser Bridge，并在日常 Edge 中启用扩展。"
             ) from exc
+        if response.status_code >= 400:
+            if response.status_code in {401, 403}:
+                raise BrowserBridgeError("Local browser bridge authentication was rejected. Check the existing bridge credential configuration; no automatic retry was made.",
+                    code="browser_bridge_authentication_failed", retryable=False)
+            if response.status_code < 500 and response.status_code not in {408, 429}:
+                raise BrowserBridgeError(f"Local browser bridge rejected the request (HTTP {response.status_code}). Inspect the action arguments before continuing.",
+                    code="browser_bridge_request_rejected", retryable=False)
+            raise BrowserBridgeError(f"Local browser bridge returned HTTP {response.status_code}; inspect service health and the original operation receipt before retrying a write.",
+                code="browser_bridge_http_error", retryable=True)
         try:
             body = response.json()
-        except ValueError:
-            body = {"detail": response.text[:1000]}
-        if response.status_code >= 400:
-            detail = body.get("detail") if isinstance(body, dict) else body
-            raise BrowserBridgeError(str(detail or f"Browser bridge HTTP {response.status_code}"))
+        except ValueError as exc:
+            raise BrowserBridgeError("Local browser bridge did not return a JSON result. Inspect the original operation receipt before retrying a write.",
+                code="browser_bridge_invalid_response", retryable=True) from exc
+        if not isinstance(body, dict) or not 200 <= response.status_code < 300:
+            raise BrowserBridgeError("Local browser bridge returned an invalid result object. Inspect the original operation receipt before retrying a write.",
+                code="browser_bridge_invalid_response", retryable=True)
         return body
 
     async def browser_instances(self, timeout: int = 10_000) -> dict[str, Any]:
-        """Discover existing instances, with verified v72 native IPC preferred."""
+        """Discover existing instances, with verified native IPC preferred."""
         return await self.call("/v1/browsers", {"timeout": timeout}, timeout / 1000 + 5)
 
     async def browser_control(self, browser_id: str, action: str, tab_id: str | None = None,
@@ -69,6 +89,13 @@ class BrowserBridgeClient:
 
         The bridge waits for native asynchronous tasks and never falls back to
         an extension after an IPC operation may have entered the browser queue.
+        arguments.execution_mode=native_background selects the restricted
+        inactive-CEF policy. execution_mode=extension_background selects guarded
+        inactive Edge DOM control. Under isolated_only the bridge selects the
+        Edge background mode automatically; physical input stays disabled.
+        Read/capture and an explicitly requested foreground mode use the modern
+        extension_dom path when advertised: active-page reads need no Windows
+        lease, and active-page edits or window focus remain refused.
         """
         return await self.call("/v1/browser/dispatch", {"browser_id": browser_id,
             "action": action, "tab_id": tab_id, "arguments": arguments,

@@ -96,3 +96,4 @@ class CanvasService:
         metadata = self.db.loads(source.get("metadata_json"), {})
         metadata["restored_from"] = revision_number
         return await self.update(canvas_id, source["content"], metadata=metadata, status="restored", created_by=created_by)
+

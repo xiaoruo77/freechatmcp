@@ -24,7 +24,10 @@ from .profiles import (
     terminal_command,
     wsl_command,
 )
-from .windows_user_process import run_command_as_active_user, should_use_active_user_context
+from .windows_user_process import (
+    _process_create_time, _terminate_owned_process_tree,
+    is_local_system, run_command_as_active_user, should_use_active_user_context,
+)
 
 
 @dataclass(slots=True)
@@ -154,14 +157,16 @@ class ProfileRunner:
         started = asyncio.get_running_loop().time()
         await on_output("INFO", command.description)
         await on_output("INFO", "Runner profile started")
-        # ``terminal_workflow(shell="wsl")`` builds the same wsl.exe command
-        # as the dedicated WSL profile.  It must use the active user's token
-        # as well; otherwise a LocalSystem service gets
-        # WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED.
+        # WSL already requires the signed-in user's token. Configured Windows
+        # terminal profiles need the same identity for SSH aliases and user
+        # configuration; changing cwd or USERPROFILE alone is insufficient.
         executable_name = Path(str(command.command[0])).name.lower() if command.command else ""
         is_wsl_command = executable_name in {"wsl", "wsl.exe"}
-        if is_wsl_command and should_use_active_user_context():
-            return await self._run_wsl_as_active_user(command, started, is_cancelled, on_output)
+        requests_active_user = command.details.get("execution_context") == "active_user"
+        if ((is_wsl_command and should_use_active_user_context())
+                or (requests_active_user and is_local_system())):
+            # A failure must propagate, never silently retry with SYSTEM.
+            return await self._run_as_active_user(command, started, is_cancelled, on_output)
         creation_flags = getattr(asyncio.subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         process = await asyncio.create_subprocess_exec(
             *command.command,
@@ -170,27 +175,41 @@ class ProfileRunner:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             creationflags=creation_flags,
+            env=command.environment,
         )
         communicate = asyncio.create_task(process.communicate())
+        owned_create_time = _process_create_time(getattr(process, "pid", None))
         timed_out = False
         cancelled = False
-        while not communicate.done():
-            done, _ = await asyncio.wait({communicate}, timeout=1)
-            if done:
-                break
-            if await is_cancelled():
-                cancelled = True
-                await self._stop_process(process)
-                break
-            if asyncio.get_running_loop().time() - started > command.timeout:
-                timed_out = True
-                await self._stop_process(process)
-                break
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(communicate, timeout=10)
-        except asyncio.TimeoutError:
-            await self._stop_process(process)
-            stdout_bytes, stderr_bytes = await communicate
+            while not communicate.done():
+                done, _ = await asyncio.wait({communicate}, timeout=1)
+                if done:
+                    break
+                if await is_cancelled():
+                    cancelled = True
+                    await self._stop_process(process, tree=True, expected_create_time=owned_create_time)
+                    break
+                if asyncio.get_running_loop().time() - started > command.timeout:
+                    timed_out = True
+                    await self._stop_process(process, tree=True, expected_create_time=owned_create_time)
+                    break
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(asyncio.shield(communicate), timeout=10)
+            except asyncio.TimeoutError:
+                await self._stop_process(process, tree=True, expected_create_time=owned_create_time)
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(asyncio.shield(communicate), timeout=10)
+        except BaseException:
+            # Service shutdown cancels this coroutine directly, without going
+            # through the task repository's cooperative cancellation callback.
+            # Finish cleaning only this invocation before releasing its lease.
+            try:
+                await self._stop_process(process, tree=True, expected_create_time=owned_create_time)
+                await asyncio.wait_for(asyncio.shield(communicate), timeout=10)
+            except BaseException:
+                communicate.cancel()
+                await asyncio.gather(communicate, return_exceptions=True)
+            raise
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         if stdout:
@@ -207,7 +226,10 @@ class ProfileRunner:
             status = "success"
         else:
             status = "failed"
-        return RunnerResult(status, process.returncode, stdout, stderr, duration)
+        details = dict(command.details)
+        if requests_active_user:
+            details["execution_context_used"] = "current_process"
+        return RunnerResult(status, process.returncode, stdout, stderr, duration, details)
 
     def _normalize_workflow(self, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
         raw_steps = payload.get("steps")
@@ -503,7 +525,7 @@ class ProfileRunner:
             {"workflow_attempts": max_attempts, "steps": step_results, "final_checks": final_check_results},
         )
 
-    async def _run_wsl_as_active_user(
+    async def _run_as_active_user(
         self,
         command: RunnerCommand,
         started: float,
@@ -522,17 +544,27 @@ class ProfileRunner:
         )
         cancelled = False
         timed_out = False
-        while not operation.done():
-            await asyncio.sleep(0.25)
-            if await is_cancelled():
-                cancelled = True
-                cancel_event.set()
-                break
-            if asyncio.get_running_loop().time() - started > command.timeout:
-                timed_out = True
-                cancel_event.set()
-                break
-        result = await operation
+        try:
+            while not operation.done():
+                await asyncio.sleep(0.25)
+                if await is_cancelled():
+                    cancelled = True
+                    cancel_event.set()
+                    break
+                if asyncio.get_running_loop().time() - started > command.timeout:
+                    timed_out = True
+                    cancel_event.set()
+                    break
+            # Cancelling the await must not detach a still-running native
+            # thread from the event used to stop its owned process.
+            result = await asyncio.shield(operation)
+        except BaseException:
+            cancel_event.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(operation), timeout=20)
+            except BaseException:
+                pass
+            raise
         stdout = result.stdout
         stderr = result.stderr
         if stdout:
@@ -549,11 +581,29 @@ class ProfileRunner:
             status = "success"
         else:
             status = "failed"
-        return RunnerResult(status, result.return_code, stdout, stderr, duration)
+        details = dict(command.details)
+        details["execution_context_used"] = "active_user"
+        return RunnerResult(status, result.return_code, stdout, stderr, duration, details)
 
-    async def _stop_process(self, process: asyncio.subprocess.Process) -> None:
+    async def _run_wsl_as_active_user(
+        self,
+        command: RunnerCommand,
+        started: float,
+        is_cancelled: Callable[[], Awaitable[bool]],
+        on_output: Callable[[str, str], Awaitable[None]],
+    ) -> RunnerResult:
+        """Compatibility entry point for callers using the former WSL name."""
+        return await self._run_as_active_user(command, started, is_cancelled, on_output)
+
+    async def _stop_process(self, process: asyncio.subprocess.Process, *, tree: bool = False,
+                            expected_create_time: float | None = None) -> None:
         if process.returncode is not None:
             return
+        if tree:
+            stopped = await asyncio.to_thread(_terminate_owned_process_tree, process.pid, expected_create_time)
+            if stopped:
+                await asyncio.wait_for(process.wait(), timeout=3)
+                return
         try:
             if os.name == "nt":
                 process.terminate()
@@ -564,6 +614,10 @@ class ProfileRunner:
             try:
                 process.kill()
             except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=3)
+            except asyncio.TimeoutError:
                 pass
 
     def save_outputs(self, task_id: str, result: RunnerResult) -> list[str]:
@@ -587,4 +641,11 @@ class ProfileRunner:
             ),
             encoding="utf-8",
         )
-        return [str(stdout_path), str(stderr_path), str(metadata_path)]
+        output_files = [str(stdout_path), str(stderr_path), str(metadata_path)]
+        for key in ("notebook_output", "notebook_report"):
+            candidate = result.details.get(key)
+            if candidate:
+                path = Path(candidate).resolve()
+                if path.parent == root.resolve() and path.is_file():
+                    output_files.append(str(path))
+        return output_files

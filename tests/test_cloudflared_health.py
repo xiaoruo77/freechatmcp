@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -55,10 +56,36 @@ def test_missing_and_labeled_metrics(health):
     ).ready is True
 
 
+@pytest.mark.parametrize(
+    "status, body, ready, reason",
+    [
+        (200, '{"readyConnections": 1}', True, "connected"),
+        (200, '{"readyConnections": 4}', True, "connected"),
+        (200, '{"readyConnections": 0}', False, "no_edge_connections"),
+        (503, '{"readyConnections": 0}', False, "no_edge_connections"),
+        (503, '{"readyConnections": 1}', False, "no_edge_connections"),
+        (500, "", False, "readiness_http_500"),
+        (200, "not-json", False, "invalid_readiness_response"),
+        (200, "[]", False, "invalid_readiness_response"),
+        (200, "{}", False, "invalid_readiness_response"),
+        (200, '{"readyConnections": true}', False, "invalid_readiness_response"),
+        (200, '{"readyConnections": "1"}', False, "invalid_readiness_response"),
+        (200, '{"readyConnections": -1}', False, "invalid_readiness_response"),
+        (200, '{"readyConnections": NaN}', False, "invalid_readiness_response"),
+        (200, '{"readyConnections": Infinity}', False, "invalid_readiness_response"),
+    ],
+)
+def test_readiness_requires_http_success_and_ready_connections(health, status, body, ready, reason):
+    observation = health.observe_readiness(status, body)
+    assert observation.alive is True
+    assert observation.ready is ready
+    assert observation.reason == reason
+
+
 def test_grace_cooldown_and_recovery(health):
     policy = health.TunnelReadinessPolicy()
-    zero = health.observe_metrics("cloudflared_tunnel_ha_connections 0")
-    connected = health.observe_metrics("cloudflared_tunnel_ha_connections 1")
+    zero = health.observe_readiness(503, '{"readyConnections": 0}')
+    connected = health.observe_readiness(200, '{"readyConnections": 1}')
     first = policy.evaluate(zero, 0)
     assert first.ready is False
     assert first.restart_allowed is False
@@ -80,8 +107,8 @@ def test_grace_cooldown_and_recovery(health):
 
 def test_short_outage_resets_grace_and_instances_are_independent(health):
     first, second = health.TunnelReadinessPolicy(), health.TunnelReadinessPolicy()
-    zero = health.observe_metrics("cloudflared_tunnel_ha_connections 0")
-    ready = health.observe_metrics("cloudflared_tunnel_ha_connections 1")
+    zero = health.observe_readiness(503, '{"readyConnections": 0}')
+    ready = health.observe_readiness(200, '{"readyConnections": 1}')
     first.evaluate(zero, 0)
     first.evaluate(ready, 150)
     first.evaluate(zero, 160)
@@ -114,9 +141,10 @@ def service_modules(monkeypatch, health):
     return common, service
 
 
-class MetricsResponse:
-    def __init__(self, body):
+class ReadinessResponse:
+    def __init__(self, body, status=200):
         self.body = body
+        self.status = status
 
     def __enter__(self):
         return self
@@ -128,11 +156,11 @@ class MetricsResponse:
         return self.body
 
 
-def make_service(monkeypatch, service_modules, clock, metrics):
+def make_service(monkeypatch, service_modules, clock, readiness):
     common, module = service_modules
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     service = module.CloudflaredService([])
-    service._health_opener = SimpleNamespace(open=lambda *args, **kwargs: MetricsResponse(metrics()))
+    service._health_opener = SimpleNamespace(open=lambda *args, **kwargs: readiness())
     logs = []
     service._write_health_log = lambda message: logs.append((clock[0], message))
     return common, service, logs
@@ -142,7 +170,7 @@ def test_service_returns_false_during_grace_and_handles_request_errors(monkeypat
     clock = [0.0]
     _, service, logs = make_service(
         monkeypatch, service_modules, clock,
-        lambda: b"cloudflared_tunnel_ha_connections 0\n",
+        lambda: ReadinessResponse(b'{"readyConnections": 0}', 503),
     )
     assert service._health_check() is False
     assert service._health_check_failures_before_restart == sys.maxsize
@@ -156,8 +184,47 @@ def test_service_returns_false_during_grace_and_handles_request_errors(monkeypat
 
     service._health_opener = SimpleNamespace(open=unavailable)
     assert service._health_check() is False
-    assert logs[-1][1] == "tunnel_degraded_changed alive=false ready=false reason=metrics_unreachable"
+    assert logs[-1][1] == "tunnel_degraded_changed alive=false ready=false reason=readiness_unreachable"
     assert all("private request" not in message for _, message in logs)
+
+
+def test_http_503_is_alive_and_positive_metrics_cannot_override_it(monkeypatch, service_modules):
+    clock = [0.0]
+    _, service, logs = make_service(
+        monkeypatch, service_modules, clock,
+        lambda: ReadinessResponse(b'{"readyConnections": 1}'),
+    )
+    requested = []
+
+    def contradictory_endpoints(request, **kwargs):
+        requested.append(request.full_url)
+        if request.full_url.endswith("/metrics"):
+            return ReadinessResponse(b"cloudflared_tunnel_ha_connections 1\n")
+        raise HTTPError(request.full_url, 503, "Service Unavailable", {}, None)
+
+    service._health_opener = SimpleNamespace(open=contradictory_endpoints)
+    assert service._health_check() is False
+    clock[0] = 180
+    assert service._health_check() is False
+    assert service._health_check_failures_before_restart == 1
+    assert requested == [service._ready_url, service._ready_url]
+    assert logs[0][1] == "tunnel_degraded alive=true ready=false reason=no_edge_connections"
+
+
+def test_read_error_is_unreachable_and_does_not_log_private_details(monkeypatch, service_modules):
+    clock = [0.0]
+
+    class BrokenResponse(ReadinessResponse):
+        def read(self, limit):
+            raise TimeoutError("private response detail must not appear in logs")
+
+    _, service, logs = make_service(
+        monkeypatch, service_modules, clock,
+        lambda: BrokenResponse(b""),
+    )
+    assert service._health_check() is False
+    assert logs[0][1] == "tunnel_degraded alive=false ready=false reason=readiness_unreachable"
+    assert all("private response" not in message for _, message in logs)
 
 
 @pytest.mark.parametrize("short_outage", [False, True])
@@ -165,16 +232,17 @@ def test_service_returns_false_during_grace_and_handles_request_errors(monkeypat
 def test_real_parent_loop_respects_grace_and_cooldown(monkeypatch, service_modules, short_outage, failure):
     clock = [0.0]
 
-    def metrics():
+    def readiness():
         if short_outage and clock[0] >= 90:
-            return b"cloudflared_tunnel_ha_connections 1\n"
+            return ReadinessResponse(b'{"readyConnections": 1}')
         if failure == "unreachable":
-            raise TimeoutError("test metrics endpoint unavailable")
-        value = b"NaN\n" if failure == "invalid" else b"0\n"
-        return b"cloudflared_tunnel_ha_connections " + value
+            raise TimeoutError("test readiness endpoint unavailable")
+        if failure == "invalid":
+            return ReadinessResponse(b"invalid readiness JSON")
+        raise HTTPError("http://127.0.0.1:20241/ready", 503, "Service Unavailable", {}, None)
 
     common, service, logs = make_service(
-        monkeypatch, service_modules, clock, metrics,
+        monkeypatch, service_modules, clock, readiness,
     )
     starts = []
     stop_at = 300 if short_outage else 1111
@@ -195,8 +263,8 @@ def test_real_parent_loop_respects_grace_and_cooldown(monkeypatch, service_modul
 
     expected_degraded = {
         "zero": "tunnel_degraded alive=true ready=false reason=no_edge_connections",
-        "invalid": "tunnel_degraded alive=true ready=false reason=invalid_connections_metric",
-        "unreachable": "tunnel_degraded alive=false ready=false reason=metrics_unreachable",
+        "invalid": "tunnel_degraded alive=true ready=false reason=invalid_readiness_response",
+        "unreachable": "tunnel_degraded alive=false ready=false reason=readiness_unreachable",
     }
     assert logs[0] == (30, expected_degraded[failure])
     if short_outage:

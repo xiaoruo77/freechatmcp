@@ -6,6 +6,14 @@ if (!globalThis.__xiaoruo1ReaderInstalled) {
   globalThis.__xiaoruo1ReaderInstalled = true;
 
   function extractReadableDocument(limit, requestedSelector, requestedMode) {
+    const observationId = () => {
+      if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+      return hex.slice(0,8)+"-"+hex.slice(8,12)+"-"+hex.slice(12,16)+"-"+hex.slice(16,20)+"-"+hex.slice(20);
+    };
     const max = Math.max(100, Math.min(100000, Number(limit || 20000)));
     const mode = ["auto", "visible", "fast"].includes(String(requestedMode || "auto"))
       ? String(requestedMode || "auto")
@@ -21,7 +29,7 @@ if (!globalThis.__xiaoruo1ReaderInstalled) {
       let observed = globalThis[key];
       const currentUrl = String(location.href || "");
       if (!observed || observed.url !== currentUrl) {
-        observed = {url: currentUrl, document_id: crypto.randomUUID(), entries: new Map()};
+        observed = {url: currentUrl, document_id: observationId(), entries: new Map()};
         globalThis[key] = observed;
       }
       const now = Date.now();
@@ -33,7 +41,7 @@ if (!globalThis.__xiaoruo1ReaderInstalled) {
         for (const [candidate, entry] of observed.entries) {
           if (entry.element === element) { token = candidate; break; }
         }
-        if (!token) token = crypto.randomUUID();
+        if (!token) token = observationId();
         element.setAttribute("data-xiaoruo1-upload-id", token);
         observed.entries.set(token, {element, observed_at: now});
         return {

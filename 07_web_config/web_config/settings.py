@@ -208,7 +208,7 @@ class Settings:
     def load(cls) -> "Settings":
         project_root = Path(os.getenv("WEB_AGENT_HOME", str(_default_home()))).expanduser().resolve()
         mode_file = project_root / "07_web_config" / "orchestration.json"
-        mode_default = "legacy_sampling"
+        mode_default = "chatgpt_direct"
         if mode_file.is_file():
             config = json.loads(mode_file.read_text(encoding="utf-8-sig"))
             if not isinstance(config, dict) or set(config) - {"orchestration_mode"}:
@@ -220,7 +220,7 @@ class Settings:
         desktop = _load_windows_mcp_options(project_root)
         data_root = Path(os.getenv("WEB_AGENT_DATA", str(project_root / "08_web_data"))).expanduser().resolve()
         log_root = Path(os.getenv("WEB_AGENT_LOGS", str(project_root / "09_web_logs"))).expanduser().resolve()
-        workspace_root = Path(os.getenv("WEB_AGENT_WORKSPACE", str(project_root))).expanduser().resolve()
+        workspace_root = Path(os.getenv("WEB_AGENT_WORKSPACE", "").strip() or (project_root / "workspace")).expanduser().resolve()
         configured_workspaces = os.getenv("WEB_AGENT_WORKSPACES", "")
         allowed = [workspace_root]
         if configured_workspaces.strip():
@@ -228,6 +228,7 @@ class Settings:
             if workspace_root not in allowed:
                 allowed.insert(0, workspace_root)
 
+        workspace_root.mkdir(parents=True, exist_ok=True)
         data_root.mkdir(parents=True, exist_ok=True)
         (data_root / "task_outputs").mkdir(parents=True, exist_ok=True)
         (data_root / "generated_scripts").mkdir(parents=True, exist_ok=True)
@@ -259,7 +260,7 @@ class Settings:
         origins = [x.strip() for x in os.getenv("WEB_AGENT_CORS_ORIGINS", "http://127.0.0.1:48271,http://localhost:5173").split(",") if x.strip()]
         public_hostnames = _csv_env(
             "WEB_AGENT_PUBLIC_HOSTNAMES",
-            "mcp.example.com,mcp.example.com,mcp.example.com",
+            "",
         )
         mcp_allowed_hosts = _csv_env(
             "WEB_AGENT_MCP_ALLOWED_HOSTS",
@@ -285,7 +286,7 @@ class Settings:
                 ]
             ),
         )
-        public_url = os.getenv("WEB_AGENT_PUBLIC_URL", "https://mcp.example.com").strip().rstrip("/")
+        public_url = (os.getenv("WEB_AGENT_PUBLIC_URL", "").strip() or f"http://127.0.0.1:{_env_int('WEB_AGENT_PORT', 48271)}").rstrip("/")
         oauth_issuer_url = os.getenv("WEB_AGENT_OAUTH_ISSUER_URL", public_url).strip().rstrip("/")
         oauth_resource_url = os.getenv(
             "WEB_AGENT_MCP_RESOURCE_URL",
@@ -294,14 +295,14 @@ class Settings:
         wsl_distribution = os.getenv("WEB_AGENT_WSL_DISTRIBUTION", "").strip() or None
         settings = cls(
             project_root=project_root,
-            display_name=os.getenv("WEB_AGENT_DISPLAY_NAME", "Xiaoruo1").strip() or "Xiaoruo1",
+            display_name=os.getenv("WEB_AGENT_DISPLAY_NAME", "FreeChatMCP").strip() or "FreeChatMCP",
             host=os.getenv("WEB_AGENT_HOST", "127.0.0.1"),
             port=_env_int("WEB_AGENT_PORT", 48271),
             workspace_root=workspace_root,
             allowed_workspaces=allowed,
             token=token,
             token_file=token_file,
-            admin_mode=_env_bool("WEB_AGENT_ADMIN_MODE", True),
+            admin_mode=_env_bool("WEB_AGENT_ADMIN_MODE", False),
             embedded_worker=_env_bool("WEB_AGENT_EMBEDDED_WORKER", False),
             log_level=os.getenv("WEB_AGENT_LOG_LEVEL", "INFO").upper(),
             cors_origins=origins,
@@ -316,8 +317,8 @@ class Settings:
                 "chatgpt.com,localhost,127.0.0.1",
             ),
             wsl_distribution=wsl_distribution,
-            allow_custom_wsl_workflow=_env_bool("WEB_AGENT_ALLOW_CUSTOM_WSL_WORKFLOW", True),
-            allow_custom_shell_workflow=_env_bool("WEB_AGENT_ALLOW_CUSTOM_SHELL_WORKFLOW", True),
+            allow_custom_wsl_workflow=_env_bool("WEB_AGENT_ALLOW_CUSTOM_WSL_WORKFLOW", False),
+            allow_custom_shell_workflow=_env_bool("WEB_AGENT_ALLOW_CUSTOM_SHELL_WORKFLOW", False),
             task_poll_interval=max(0.2, float(os.getenv("WEB_AGENT_TASK_POLL_INTERVAL", "1"))),
             default_task_timeout=max(1, _env_int("WEB_AGENT_TASK_TIMEOUT", 3600)),
             database_path=data_root / "web_agent.sqlite3",

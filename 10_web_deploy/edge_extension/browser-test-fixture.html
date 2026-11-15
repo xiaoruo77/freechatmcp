@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>Xiaoruo1 Edge upload fixture</title>
+<style id="native-capture-high-contrast">html,body{background:#fff!important;color:#111!important}p,output,h1,h2,label,section{color:#111!important}#native-long-scroll p{background:#f4f6f8;padding:3px;margin:8px}</style>
+<h1>Xiaoruo1 文件选择测试；不提交到外部服务器</h1>
+<label>单个文件<input id="single" type="file" accept="video/mp4,image/png,image/jpeg"></label>
+<label>重复名称一<input name="buploader" type="file" accept="video/*"></label>
+<label>重复名称二<input name="buploader" type="file" accept="video/*" style="display:none"></label>
+<label>禁用<input id="disabled" type="file" disabled></label>
+<button id="clear" type="button">清空测试选择</button>
+<pre id="result">No file selected</pre>
+<script>
+window.fixtureChanges = 0;
+for (const input of document.querySelectorAll('input[type="file"]')) {
+  input.addEventListener('change', () => {
+    window.fixtureChanges++;
+    document.querySelector('#result').textContent = JSON.stringify({
+      input_id: input.id, input_name: input.name, changes: window.fixtureChanges,
+      selected_files: Array.from(input.files).map(file => ({name:file.name,size:file.size,type:file.type})),
+      stages: {file_selected:true,upload_started:false,server_received:false,platform_processed:false}
+    }, null, 2);
+  });
+}
+document.querySelector('#clear').addEventListener('click', () => {
+  for (const input of document.querySelectorAll('input[type="file"]')) input.value='';
+  document.querySelector('#result').textContent='No file selected';
+});
+</script>
+<hr><h2>Unified browser interaction fixture</h2>
+<input id="dynamic-input" placeholder="dynamic test"><button id="dynamic-button" type="button">Apply</button><output id="dynamic-state">unchanged</output>
+<iframe id="test-frame" title="owned iframe" srcdoc="&lt;input id='frame-input' placeholder='frame test'&gt;&lt;button id='frame-button' onclick='document.querySelector(&amp;quot;#frame-state&amp;quot;).textContent=document.querySelector(&amp;quot;#frame-input&amp;quot;).value'&gt;Apply frame&lt;/button&gt;&lt;output id='frame-state'&gt;frame unchanged&lt;/output&gt;"></iframe>
+<div id="shadow-host"></div><div style="height:1800px">Scroll fixture</div><p id="bottom-marker">BOTTOM VERIFIED</p>
+<script>
+document.querySelector('#dynamic-button').onclick=()=>{setTimeout(()=>{document.querySelector('#dynamic-state').textContent=document.querySelector('#dynamic-input').value;},150)};
+const shadow=document.querySelector('#shadow-host').attachShadow({mode:'open'});
+shadow.innerHTML='<input id="shadow-input" placeholder="shadow test"><button id="shadow-button">Apply shadow</button><output id="shadow-state">shadow unchanged</output>';
+shadow.querySelector('#shadow-button').onclick=()=>{shadow.querySelector('#shadow-state').textContent=shadow.querySelector('#shadow-input').value;};
+</script>
+<section id="native-long-scroll"><p>Native IPC scroll fixture row 000</p><p>Native IPC scroll fixture row 001</p><p>Native IPC scroll fixture row 002</p><p>Native IPC scroll fixture row 003</p><p>Native IPC scroll fixture row 004</p><p>Native IPC scroll fixture row 005</p><p>Native IPC scroll fixture row 006</p><p>Native IPC scroll fixture row 007</p><p>Native IPC scroll fixture row 008</p><p>Native IPC scroll fixture row 009</p><p>Native IPC scroll fixture row 010</p><p>Native IPC scroll fixture row 011</p><p>Native IPC scroll fixture row 012</p><p>Native IPC scroll fixture row 013</p><p>Native IPC scroll fixture row 014</p><p>Native IPC scroll fixture row 015</p><p>Native IPC scroll fixture row 016</p><p>Native IPC scroll fixture row 017</p><p>Native IPC scroll fixture row 018</p><p>Native IPC scroll fixture row 019</p><p>Native IPC scroll fixture row 020</p><p>Native IPC scroll fixture row 021</p><p>Native IPC scroll fixture row 022</p><p>Native IPC scroll fixture row 023</p><p>Native IPC scroll fixture row 024</p><p>Native IPC scroll fixture row 025</p><p>Native IPC scroll fixture row 026</p><p>Native IPC scroll fixture row 027</p><p>Native IPC scroll fixture row 028</p><p>Native IPC scroll fixture row 029</p><p>Native IPC scroll fixture row 030</p><p>Native IPC scroll fixture row 031</p><p>Native IPC scroll fixture row 032</p><p>Native IPC scroll fixture row 033</p><p>Native IPC scroll fixture row 034</p><p>Native IPC scroll fixture row 035</p><p>Native IPC scroll fixture row 036</p><p>Native IPC scroll fixture row 037</p><p>Native IPC scroll fixture row 038</p><p>Native IPC scroll fixture row 039</p><p>Native IPC scroll fixture row 040</p><p>Native IPC scroll fixture row 041</p><p>Native IPC scroll fixture row 042</p><p>Native IPC scroll fixture row 043</p><p>Native IPC scroll fixture row 044</p><p>Native IPC scroll fixture row 045</p><p>Native IPC scroll fixture row 046</p><p>Native IPC scroll fixture row 047</p><p>Native IPC scroll fixture row 048</p><p>Native IPC scroll fixture row 049</p><p>Native IPC scroll fixture row 050</p><p>Native IPC scroll fixture row 051</p><p>Native IPC scroll fixture row 052</p><p>Native IPC scroll fixture row 053</p><p>Native IPC scroll fixture row 054</p><p>Native IPC scroll fixture row 055</p><p>Native IPC scroll fixture row 056</p><p>Native IPC scroll fixture row 057</p><p>Native IPC scroll fixture row 058</p><p>Native IPC scroll fixture row 059</p><p>Native IPC scroll fixture row 060</p><p>Native IPC scroll fixture row 061</p><p>Native IPC scroll fixture row 062</p><p>Native IPC scroll fixture row 063</p><p>Native IPC scroll fixture row 064</p><p>Native IPC scroll fixture row 065</p><p>Native IPC scroll fixture row 066</p><p>Native IPC scroll fixture row 067</p><p>Native IPC scroll fixture row 068</p><p>Native IPC scroll fixture row 069</p><p>Native IPC scroll fixture row 070</p><p>Native IPC scroll fixture row 071</p><p>Native IPC scroll fixture row 072</p><p>Native IPC scroll fixture row 073</p><p>Native IPC scroll fixture row 074</p><p>Native IPC scroll fixture row 075</p><p>Native IPC scroll fixture row 076</p><p>Native IPC scroll fixture row 077</p><p>Native IPC scroll fixture row 078</p><p>Native IPC scroll fixture row 079</p><p>Native IPC scroll fixture row 080</p><p>Native IPC scroll fixture row 081</p><p>Native IPC scroll fixture row 082</p><p>Native IPC scroll fixture row 083</p><p>Native IPC scroll fixture row 084</p><p>Native IPC scroll fixture row 085</p><p>Native IPC scroll fixture row 086</p><p>Native IPC scroll fixture row 087</p><p>Native IPC scroll fixture row 088</p><p>Native IPC scroll fixture row 089</p><p>Native IPC scroll fixture row 090</p><p>Native IPC scroll fixture row 091</p><p>Native IPC scroll fixture row 092</p><p>Native IPC scroll fixture row 093</p><p>Native IPC scroll fixture row 094</p><p>Native IPC scroll fixture row 095</p><p>Native IPC scroll fixture row 096</p><p>Native IPC scroll fixture row 097</p><p>Native IPC scroll fixture row 098</p><p>Native IPC scroll fixture row 099</p><p>Native IPC scroll fixture row 100</p><p>Native IPC scroll fixture row 101</p><p>Native IPC scroll fixture row 102</p><p>Native IPC scroll fixture row 103</p><p>Native IPC scroll fixture row 104</p><p>Native IPC scroll fixture row 105</p><p>Native IPC scroll fixture row 106</p><p>Native IPC scroll fixture row 107</p><p>Native IPC scroll fixture row 108</p><p>Native IPC scroll fixture row 109</p><p>Native IPC scroll fixture row 110</p><p>Native IPC scroll fixture row 111</p><p>Native IPC scroll fixture row 112</p><p>Native IPC scroll fixture row 113</p><p>Native IPC scroll fixture row 114</p><p>Native IPC scroll fixture row 115</p><p>Native IPC scroll fixture row 116</p><p>Native IPC scroll fixture row 117</p><p>Native IPC scroll fixture row 118</p><p>Native IPC scroll fixture row 119</p><p>Native IPC scroll fixture row 120</p><p>Native IPC scroll fixture row 121</p><p>Native IPC scroll fixture row 122</p><p>Native IPC scroll fixture row 123</p><p>Native IPC scroll fixture row 124</p><p>Native IPC scroll fixture row 125</p><p>Native IPC scroll fixture row 126</p><p>Native IPC scroll fixture row 127</p><p>Native IPC scroll fixture row 128</p><p>Native IPC scroll fixture row 129</p><p>Native IPC scroll fixture row 130</p><p>Native IPC scroll fixture row 131</p><p>Native IPC scroll fixture row 132</p><p>Native IPC scroll fixture row 133</p><p>Native IPC scroll fixture row 134</p><p>Native IPC scroll fixture row 135</p><p>Native IPC scroll fixture row 136</p><p>Native IPC scroll fixture row 137</p><p>Native IPC scroll fixture row 138</p><p>Native IPC scroll fixture row 139</p><p>Native IPC scroll fixture row 140</p><p>Native IPC scroll fixture row 141</p><p>Native IPC scroll fixture row 142</p><p>Native IPC scroll fixture row 143</p><p>Native IPC scroll fixture row 144</p><p>Native IPC scroll fixture row 145</p><p>Native IPC scroll fixture row 146</p><p>Native IPC scroll fixture row 147</p><p>Native IPC scroll fixture row 148</p><p>Native IPC scroll fixture row 149</p></section>
+<output id="background-key-state">Enter 0</output>
+<script>
+window.backgroundEnterCount=0;
+document.querySelector('#dynamic-input').addEventListener('keydown', event=>{
+ if(event.key==='Enter'){
+  event.preventDefault();window.backgroundEnterCount++;
+  document.querySelector('#background-key-state').textContent='Enter '+window.backgroundEnterCount+': '+event.target.value;
+ }
+});
+</script>
+<section id="reliability-fixture" aria-label="Browser reliability workflow">
+  <h2>Browser reliability workflow</h2>
+  <p>Only disposable local controls are changed by these checks.</p>
+  <p><label>留给你手动输入的测试框（自动测试不会修改它）<input id="flow-human-input" type="text" autocomplete="off"></label></p>
+  <output id="flow-marker">FLOW initial</output>
+  <nav aria-label="Fixture pagination">
+    <span id="flow-legacy-page" aria-current="page">LEGACY PAGE 1</span>
+    <a id="flow-legacy-next" href="javascript:void(window.advanceFixturePager())">Next page</a>
+  </nav>
+  <form method="get">
+    <input type="hidden" name="reliability" value="same">
+    <button id="flow-native-submit" type="submit">Disposable form submission</button>
+  </form>
+  <nav aria-label="Observed navigation targets">
+    <a id="flow-same" href="?reliability=same">Same tab link</a>
+    <a id="flow-blank" href="?reliability=blank" target="_blank" rel="noopener">New inactive tab link</a>
+    <a id="flow-redirect" href="/browser-test/redirect">Fixed redirect link</a>
+    <a id="flow-cross-origin" href="https://example.com/" target="_blank" rel="noopener">Public cross-origin link</a>
+    <a id="flow-download" href="/browser-test/download.txt" download="xiaoruo1-browser-validation.txt">Disposable download check</a>
+  </nav>
+  <p><label><input id="flow-checkbox" type="checkbox">Checkbox check</label></p>
+  <p>
+    <label><input id="flow-radio-a" name="flow-radio" type="radio" value="alpha" checked>Radio alpha</label>
+    <label><input id="flow-radio-b" name="flow-radio" type="radio" value="beta">Radio beta</label>
+  </p>
+  <label>Option <select id="flow-select"><option value="alpha">Alpha</option><option value="beta">Beta</option></select></label>
+  <label>Duplicate option value <select id="flow-duplicate-select"><option value="">Empty first</option><option value="">Empty second</option><option value="shared">Shared first</option><option value="shared">Shared second</option><optgroup label="Disabled group" disabled><option value="blocked">Blocked option</option></optgroup></select></label>
+  <output id="flow-duplicate-select-state">DUPLICATE_SELECT 0</output>
+  <div id="flow-editable" role="textbox" aria-label="Disposable editable text" contenteditable="true">Initial editable text</div>
+  <button id="flow-apply" type="button">Apply local controls</button>
+  <output id="flow-control-state">CONTROLS unchanged</output>
+  <button id="flow-once" type="button">Increment once</button><output id="flow-once-count">ONCE 0</output>
+  <button id="flow-checkpoint-noop" type="button">Disposable unverified click recovery</button>
+  <button id="flow-delayed" type="button">Delayed local result</button><output id="flow-delay-state">DELAY unchanged</output>
+</section>
+<script>
+(() => {
+  window.advanceFixturePager = () => {
+    document.querySelector('#flow-legacy-page').textContent = 'LEGACY PAGE 2';
+  };
+  const allowed = new Set(['initial','same','blank','redirected','slow','cooperative']);
+  const requested = new URLSearchParams(location.search).get('reliability') || 'initial';
+  document.querySelector('#flow-marker').textContent = 'FLOW ' + (allowed.has(requested) ? requested : 'initial');
+  if (requested === 'cooperative') document.title = 'Xiaoruo1 同标签协作测试';
+  let onceCount = 0, delayedCount = 0;
+  document.querySelector('#flow-once').addEventListener('click', () => {
+    onceCount++;
+    document.querySelector('#flow-once-count').textContent = 'ONCE ' + onceCount;
+  });
+  document.querySelector('#flow-delayed').addEventListener('click', () => {
+    delayedCount++;
+    const count = delayedCount;
+    setTimeout(() => { document.querySelector('#flow-delay-state').textContent = 'DELAY ' + count; }, 600);
+  });
+  document.querySelector('#flow-apply').addEventListener('click', () => {
+    const checked = document.querySelector('#flow-checkbox').checked ? 'checked' : 'unchecked';
+    const radio = document.querySelector('#flow-radio-b').checked ? 'beta' : 'alpha';
+    const option = document.querySelector('#flow-select').value === 'beta' ? 'beta' : 'alpha';
+    const editable = document.querySelector('#flow-editable').textContent.slice(0, 200);
+    document.querySelector('#flow-control-state').textContent = 'CONTROLS ' + checked + ' ' + radio + ' ' + option + ' ' + editable;
+  });
+  document.querySelector('#flow-duplicate-select').addEventListener('change',event=>{
+    document.querySelector('#flow-duplicate-select-state').textContent='DUPLICATE_SELECT '+event.target.selectedIndex;
+  });
+  if (requested === 'slow') {
+    const image = document.createElement('img');
+    image.id = 'flow-pending-image'; image.alt = ''; image.width = 1; image.height = 1;
+    image.src = '/browser-test/slow-image.svg';
+    document.querySelector('#reliability-fixture').appendChild(image);
+  }
+})();
+</script>
+<iframe id="form-result-frame" title="Disposable nested form" sandbox="allow-scripts allow-forms"></iframe>
+<script>
+document.querySelector('#form-result-frame').srcdoc = `<!doctype html><meta charset="utf-8">
+<style>.form-pane{display:none}.form-pane.active{display:block}textarea{width:320px;height:70px}</style>
+<button id="show-form" type="button">Open disposable form panel</button>
+<section id="form-pane" class="form-pane">
+  <label>Fixture textarea<textarea id="nested-text" name="nested-text"></textarea></label>
+  <label>Fixture input<input id="nested-input"></label>
+  <textarea id="nested-readonly" readonly>READONLY_ORIGINAL</textarea>
+  <input id="nested-readonly-trigger" readonly value="CHOOSE_OPTION" aria-label="Disposable readonly dropdown">
+  <output id="nested-menu-state">MENU_CLOSED</output>
+  <textarea id="nested-disabled" disabled>DISABLED_ORIGINAL</textarea>
+  <div id="nested-editable" contenteditable="true" role="textbox">EDITABLE_ORIGINAL</div>
+  <output id="nested-model-state">MODEL_UNCHANGED</output>
+</section>
+<script>
+document.querySelector('#show-form').onclick=()=>document.querySelector('#form-pane').classList.add('active');
+let menuOpenCount=0;
+document.querySelector('#nested-readonly-trigger').onclick=()=>{
+  document.querySelector('#nested-menu-state').textContent='MENU_OPEN_'+(++menuOpenCount);
+};
+document.querySelector('#nested-text').addEventListener('input',event=>{
+  document.querySelector('#nested-model-state').textContent='MODEL_'+event.target.value;
+});
+<\/script>`;
+</script>
+</html>

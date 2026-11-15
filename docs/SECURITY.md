@@ -10,3 +10,5 @@ This project can operate on local files, browsers, terminals and, when enabled, 
 - Treat task logs and acceptance test artifacts as potentially private.
 - Review code and dependencies before running with elevated privileges.
 - Rotate any previously disclosed keys. Removing keys from a Git commit does not revoke them.
+
+v0.3.0 fresh installs use a separate workspace, loopback defaults, no admin privileges, and no implicit foreground fallback. Set per-installation values locally. Keep the optional background token under an appropriate Windows ACL. Do not run scripts from other people’s repository issues or browser pages just because a tool is configured.

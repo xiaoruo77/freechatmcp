@@ -1,0 +1,7 @@
+{
+  "port": 48911,
+  "token_file": "C:/replace-with-private-config-path/background-desktop.token",
+  "data_root": "C:/replace-with-private-data-path/freechatmcp",
+  "idle_timeout_seconds": 120,
+  "allowed_apps": {}
+}

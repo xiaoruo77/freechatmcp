@@ -6,9 +6,14 @@ Open-source bridge that lets a supported web-chat AI client control a local Wind
 
 This is not an API bypass, a way to obtain unlimited AI calls, or a zero-cost guarantee. It uses supported client-side integration and user-authorized tool calls.
 
-## v0.2.0 — Browser control and upload
+## v0.3.0 — Windows background workspace and verifiable actions
 
-New support for unified browser operations, Windows native IPC, file upload workflows and accompanying tests. This release retains the original MCP tool interfaces and excludes local credentials, runtime state, and browser binaries.
+- **Optional background desktop** for supported Windows applications. Separate Edge instances and supported UI Automation controls reduce interference with the user's foreground. WPS Writer uses a private window and verifies edits and Save As; no promise is made for all applications, GPU surfaces, Office variants or Windows installations.
+- **Better browser operation receipts.** Navigation, downloads, forms and uploads distinguish dispatch, pending/uncertain state and observed results. Look up the receipt before retrying an operation.
+- **Python and Notebook isolation.** Choose a configured interpreter for each project and run notebooks in a separate kernel. The input notebook is never overwritten by the notebook executor. User code can still have side effects.
+- **Evidence-based host/worker coordination.** Persist the goal, checkpoints and explicit acceptance; reread actual worker output; do not turn an uncertain effect into success or reissue it automatically.
+
+[v0.2.0](https://github.com/xiaoruo77/freechatmcp/releases/tag/v0.2.0) introduced unified browser control, native IPC and uploads. [v0.1.0](https://github.com/xiaoruo77/freechatmcp/releases/tag/v0.1.0) is the original connection/deployment snapshot.
 
 ## Components
 
@@ -30,7 +35,8 @@ Requires Windows, an appropriate Python installation, Node.js/npm for the fronte
 3. Install packages using .venv/Scripts/python.exe -m pip install -e ".[dev]".
 4. In 01_web_frontend, run npm install and npm run build.
 5. Start run_server.py and run_worker.py using the virtual environment's Python executable.
-6. Local UI and MCP endpoint default to 127.0.0.1:48271.
+6. Local UI and MCP endpoint default to 127.0.0.1:48271. The default file workspace is the separate `workspace/` directory.
+7. See [optional Windows background setup](docs/BACKGROUND_WINDOWS.md).
 
 This repository provides source code only. Python/Node environments, third-party Windows-MCP components, cloudflared configuration, browser sessions and installed credentials are not bundled.
 

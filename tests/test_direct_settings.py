@@ -18,7 +18,7 @@ def configure(monkeypatch, tmp_path):
 
 def test_mode_rollout_is_opt_in_and_environment_can_override(monkeypatch, tmp_path):
     Settings, path = configure(monkeypatch, tmp_path)
-    assert Settings.load().orchestration_mode == "legacy_sampling"
+    assert Settings.load().orchestration_mode == "chatgpt_direct"
     path.write_text(json.dumps({"orchestration_mode": "chatgpt_direct"}), encoding="utf-8-sig")
     assert Settings.load().orchestration_mode == "chatgpt_direct"
     monkeypatch.setenv("WEB_AGENT_ORCHESTRATION_MODE", "legacy_sampling")
@@ -42,3 +42,17 @@ def test_desktop_launcher_uses_explicit_argument_array_and_defaults_off(monkeypa
     monkeypatch.setenv("WEB_AGENT_WINDOWS_MCP_ARGS_JSON", '"serve --transport stdio"')
     with pytest.raises(ValueError):
         Settings.load()
+
+
+def test_public_fresh_install_defaults_are_restricted(monkeypatch, tmp_path):
+    Settings, _ = configure(monkeypatch, tmp_path)
+    for key in ("WEB_AGENT_ADMIN_MODE", "WEB_AGENT_ALLOW_CUSTOM_WSL_WORKFLOW",
+                "WEB_AGENT_ALLOW_CUSTOM_SHELL_WORKFLOW", "WEB_AGENT_PUBLIC_HOSTNAMES",
+                "WEB_AGENT_HOST", "WEB_AGENT_PORT", "WEB_AGENT_WORKSPACE", "WEB_AGENT_WORKSPACES"):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings.load()
+    assert settings.host == "127.0.0.1"
+    assert settings.workspace_root == tmp_path / "workspace"
+    assert not settings.admin_mode and not settings.allow_custom_wsl_workflow
+    assert not settings.allow_custom_shell_workflow
+    assert set(settings.mcp_allowed_hosts) == {"127.0.0.1:*", "localhost:*", "[::1]:*"}

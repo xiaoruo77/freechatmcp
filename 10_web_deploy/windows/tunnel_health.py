@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ class TunnelObservation:
 
 
 def observe_metrics(metrics: str) -> TunnelObservation:
-    """A responding metrics server is alive; only a connected tunnel is ready."""
+    """Parse connection metrics for diagnostics, not authoritative readiness."""
     for line in metrics.splitlines():
         match = _CONNECTIONS_METRIC.fullmatch(line.strip())
         if not match:
@@ -39,6 +40,31 @@ def observe_metrics(metrics: str) -> TunnelObservation:
             connections,
         )
     return TunnelObservation(True, False, "missing_connections_metric")
+
+
+def observe_readiness(status: int, body: str) -> TunnelObservation:
+    """Trust /ready instead of a connection gauge that can remain positive."""
+    if status != 200:
+        reason = "no_edge_connections" if status == 503 else f"readiness_http_{status}"
+        return TunnelObservation(True, False, reason)
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return TunnelObservation(True, False, "invalid_readiness_response")
+    connections = payload.get("readyConnections") if isinstance(payload, dict) else None
+    if (
+        isinstance(connections, bool)
+        or not isinstance(connections, (int, float))
+        or (isinstance(connections, float) and not math.isfinite(connections))
+        or connections < 0
+    ):
+        return TunnelObservation(True, False, "invalid_readiness_response")
+    return TunnelObservation(
+        True,
+        connections > 0,
+        "connected" if connections > 0 else "no_edge_connections",
+        connections,
+    )
 
 
 @dataclass(frozen=True)

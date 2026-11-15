@@ -1,10 +1,10 @@
-importScripts("config.js", "upload.js", "identity.js", "advanced.js", "unified-actions.js");
+importScripts("config.js", "upload.js", "identity.js", "advanced.js", "unified-actions.js", "edge-reader.js", "edge-background.js", "edge-dom.js", "activity-marker.js", "activity.js");
 
 const BRIDGE_PORT = 48272;
 const TOKEN = String(globalThis.XIAORUO1_BRIDGE_TOKEN || "");
 const WS_URL = `ws://127.0.0.1:${BRIDGE_PORT}/ws?token=${encodeURIComponent(TOKEN)}`;
 const CONNECT_ALARM = "xiaoruo1-edge-bridge-connect";
-const EXTENSION_VERSION = "1.9.0";
+const EXTENSION_VERSION = "1.9.13";
 const BROWSER_FAMILY = /Edg\//.test(navigator.userAgent || "") ? "edge" : "chromium-other";
 const BROWSER_VERSION = ((navigator.userAgent || "").match(/(?:Edg|Chrome)\/([0-9.]+)/) || [])[1] || "unknown";
 const READ_LOAD_GRACE_MS = 2500;
@@ -154,8 +154,7 @@ async function resolveTab(value) {
 
 function setBadge(online) {
   connected = online;
-  chrome.action.setBadgeText({text: online ? "ON" : "OFF"}).catch(() => {});
-  chrome.action.setBadgeBackgroundColor({color: online ? "#15803d" : "#6b7280"}).catch(() => {});
+  edgeActivityConnection(online);
 }
 
 function scheduleReconnect() {
@@ -426,12 +425,16 @@ async function listTabs() {
   return {
     ...(await browserIdentity()),
     extension_version: EXTENSION_VERSION,
+    background_state: await edgeBackgroundState(tabs),
     tabs: tabs.map((tab) => ({
       tab_id: String(tab.id),
       title: tab.title || "",
       url: tab.url || "",
       active: Boolean(tab.active),
       window_id: String(tab.windowId),
+      status: tab.status || "unknown",
+      pending_url: String(tab.pendingUrl || ""),
+      opener_tab_id: Number.isInteger(tab.openerTabId) ? String(tab.openerTabId) : null,
       incognito: Boolean(tab.incognito)
     }))
   };
@@ -569,6 +572,16 @@ async function recoverReadFromDuplicate(originalId, params) {
 }
 
 function extractReadableDocument(limit, requestedSelector, requestedMode) {
+  // randomUUID is secure-context-only; the existing logged-in HTTP portal
+  // still needs collision-resistant file-input observation identifiers.
+  const observationId = () => {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+    return hex.slice(0,8)+"-"+hex.slice(8,12)+"-"+hex.slice(12,16)+"-"+hex.slice(16,20)+"-"+hex.slice(20);
+  };
   const max = Math.max(100, Math.min(100000, Number(limit || 20000)));
   const mode = ["auto", "visible", "fast"].includes(String(requestedMode || "auto"))
     ? String(requestedMode || "auto")
@@ -584,7 +597,7 @@ function extractReadableDocument(limit, requestedSelector, requestedMode) {
     let observed = globalThis[key];
     const currentUrl = String(location.href || "");
     if (!observed || observed.url !== currentUrl) {
-      observed = {url: currentUrl, document_id: crypto.randomUUID(), entries: new Map()};
+      observed = {url: currentUrl, document_id: observationId(), entries: new Map()};
       globalThis[key] = observed;
     }
     const now = Date.now();
@@ -596,7 +609,7 @@ function extractReadableDocument(limit, requestedSelector, requestedMode) {
       for (const [candidate, entry] of observed.entries) {
         if (entry.element === element) { token = candidate; break; }
       }
-      if (!token) token = crypto.randomUUID();
+      if (!token) token = observationId();
       element.setAttribute("data-xiaoruo1-upload-id", token);
       observed.entries.set(token, {element, observed_at: now});
       return {
@@ -1444,24 +1457,39 @@ async function closeTab(params) {
   return {tab_id: String(id), closed: true, title: tab.title || "", url: tab.url || ""};
 }
 
-const COMMANDS = {activate_tab:activateTab,scroll:scrollTab,connection_status:async()=>({...await browserIdentity(),connected}),debug_status:debugStatus,debug_attach:debugAttach,debug_snapshot:debugSnapshot,debug_detach:debugDetach,list_tabs: listTabs, list_downloads: listDownloads, open_tab: openTab, navigate, read_page: readPage, click: clickElement, type_text: typeText, press_key: pressKey, select_option: selectOption, upload_file: uploadFile, wait: waitTab, screenshot, close_tab: closeTab};
+const COMMANDS = {activate_tab:activateTab,scroll:scrollTab,connection_status:async()=>({...await browserIdentity(),connected,activity:edgeActivitySnapshot()}),debug_status:debugStatus,debug_attach:debugAttach,debug_snapshot:debugSnapshot,debug_detach:debugDetach,list_tabs: listTabs, list_downloads: listDownloads, open_tab: openTab, navigate, read_page: readPage, click: clickElement, type_text: typeText, press_key: pressKey, select_option: selectOption, upload_file: uploadFile, wait: waitTab, screenshot, close_tab: closeTab};
 
 async function handleCommand(message) {
   if (!message || !message.id || !message.method) return;
   const command = COMMANDS[message.method];
   if (!command) return reply(message.id, null, new Error(`Unknown Edge bridge command: ${message.method}`));
+  let activityId = null, activityValue = null, activityFailure = null;
   try {
     const params = message.params || {};
+    activityId = await edgeActivitySafe(()=>edgeActivityBegin(String(message.id),message.method,params,params.background_only === true));
+    if (params.browser_dom_only === true) {
+      activityValue = await edgeDomCommand(message.method, params, ()=>edgeActivityExecuting(activityId));
+      return reply(message.id, activityValue, null);
+    }
+    if (params.background_only === true) {
+      activityValue = await edgeBackgroundCommand(message.method, params, ()=>edgeActivityExecuting(activityId));
+      return reply(message.id, activityValue, null);
+    }
     const scoped = {read_page:"read",click:"click",type_text:"type",press_key:"press",select_option:"select"}[message.method];
     const result = scoped && scopedRequested(params) ? await scopedAction(params,scoped) : await command(params);
+    activityValue = result;
     reply(message.id, result, null);
   } catch (error) {
+    activityFailure = error;
     if (message.method === "upload_file" && error.action_may_have_run === false) {
       const code = /^upload_[a-z_]+$/.test(String(error.message || "")) ? String(error.message) : "upload_refused_before_selection";
-      return reply(message.id, {file_selected:false, action_may_have_run:false, error:{code},
-        stages:{file_selected:false, upload_started:null, server_received:null, platform_processed:null}}, null);
+      activityValue = {file_selected:false, action_may_have_run:false, error:{code},
+        stages:{file_selected:false, upload_started:null, server_received:null, platform_processed:null}};
+      return reply(message.id, activityValue, null);
     }
     reply(message.id, null, error);
+  } finally {
+    if (activityId) await edgeActivitySafe(()=>edgeActivityFinish(activityId,activityValue,activityFailure));
   }
 }
 
@@ -1502,10 +1530,10 @@ chrome.runtime.onInstalled.addListener(connect);
 // calls.  Do not delete the snapshot on onRemoved: that snapshot is exactly
 // what lets a later call detect an Edge restart and safely rebind an old id.
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => rememberTab(tab));
-chrome.tabs.onRemoved.addListener(() => {});
+chrome.tabs.onRemoved.addListener((tabId) => edgeActivityRemoved(tabId));
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.action === "status") {
-    sendResponse({connected, bridge: "127.0.0.1:48272"});
+    sendResponse({connected, bridge: "127.0.0.1:48272", version:EXTENSION_VERSION, activity:edgeActivitySnapshot()});
     return false;
   }
   if (message && message.action === "reconnect") {

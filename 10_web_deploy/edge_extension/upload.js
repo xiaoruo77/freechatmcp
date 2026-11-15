@@ -18,7 +18,7 @@ function uploadAllowedUrl(value) {
     const url = new URL(value);
     return (url.protocol === "https:" && url.hostname === "member.bilibili.com" &&
       url.pathname.startsWith("/platform/upload/") && (!url.port || url.port === "443") && !url.username && !url.password) ||
-      (["http://127.0.0.1:48272", "https://mcp.example.com"].includes(url.origin) && url.pathname === "/upload-test/fixture.html" && !url.search && !url.hash);
+      (url.origin === "http://127.0.0.1:48272" && url.pathname === "/upload-test/fixture.html" && !url.search && !url.hash);
   } catch (_) { return false; }
 }
 

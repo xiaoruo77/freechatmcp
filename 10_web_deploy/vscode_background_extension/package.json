@@ -1,0 +1,13 @@
+{
+  "name": "xiaoruo1-background-bridge",
+  "displayName": "Xiaoruo1 Background Workspace Bridge",
+  "description": "Restricted local workspace and notebook document APIs without editor focus actions.",
+  "version": "0.1.0",
+  "publisher": "xiaoruo1-local",
+  "engines": {"vscode": "^1.85.0"},
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "extensionKind": ["workspace"],
+  "capabilities": {"untrustedWorkspaces": {"supported": false}},
+  "license": "UNLICENSED"
+}

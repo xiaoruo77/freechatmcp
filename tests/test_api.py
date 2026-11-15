@@ -30,7 +30,7 @@ def test_health_and_auth(isolated_settings):
         assert "/messages" in route_paths
         mcp_probe_headers = {
             **headers(),
-            "Host": "mcp.example.com",
+            "Host": "127.0.0.1:48271",
         }
         assert client.options("/mcp", headers=mcp_probe_headers).status_code != 421
 

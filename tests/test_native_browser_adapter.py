@@ -2,10 +2,12 @@ from copy import deepcopy
 import base64
 import json
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
-from web_tools.xiaoruo_browser_adapter import NativeXiaoruoBrowserAdapter, NativeAdapterError
+from web_tools.xiaoruo_browser_adapter import NativeXiaoruoBrowserAdapter, NativeAdapterError, _cef_helper_script
 
 
 IDENTIFIER = 'native_12345678abcdef'
@@ -65,6 +67,9 @@ class Client:
                        'maximum': {'x': 800, 'y': 1200},
                        'before': {'x': 0, 'y': 0}, 'after': {'x': 5, 'y': 400},
                        'scrolled': True, 'at_boundary': False},
+            'read_dom': {'helper': 'xiaoruo1-cef-dom-observation/1', 'url': 'https://example.test/old',
+                         'text': 'observed page', 'file_inputs': [], 'elements': [], 'images': [],
+                         'observation_complete': True},
         }
 
     async def capabilities(self, timeout=30):
@@ -78,7 +83,8 @@ class Client:
         assert script[len(prefix) + end:].startswith(';\n')
         kinds = {'xiaoruo1-cef-semantic-click/1': 'click',
                  'xiaoruo1-cef-click-observation/1': 'observe_click',
-                 'xiaoruo1-cef-scroll/1': 'scroll'}
+                 'xiaoruo1-cef-scroll/1': 'scroll',
+                 'xiaoruo1-cef-dom-observation/1': 'read_dom'}
         kind = next(kind for marker, kind in kinds.items() if marker in script)
         self.helper_calls.append((kind, arguments))
         return deepcopy(self.helper_results[kind])
@@ -229,6 +235,76 @@ async def test_native_page_png_is_saved_privately_not_returned_as_base64(adapter
     assert result['verified'] and Path(result['path']).read_bytes() == PNG
     assert Path(result['path']).parent == value.data_root / 'browser_screenshots'
     assert 'data' not in result and 'data_url' not in result
+
+
+@pytest.mark.parametrize('action,mode', [('screenshot', 'page'), ('screenshot_window', 'window')])
+async def test_status_recovers_original_capture_without_another_dispatch(adapter, action, mode):
+    value, _, client = adapter
+
+    async def status(name, arguments, timeout):
+        client.calls.append((name, arguments))
+        return {'structured': {'task': {'id': 'xr-12345-4', 'action': action, 'state': 'succeeded'}},
+                'images': [{'mimeType': 'image/png', 'data': base64.b64encode(PNG).decode()}]}
+
+    client.call_tool = status
+    result = await call(value, 'task_status', {'task_id': 'xr-12345-4'})
+    assert result['verified'] and result['native_task_succeeded']
+    assert result['recovered_from_task_status'] and result['screenshot_mode'] == mode
+    assert Path(result['path']).read_bytes() == PNG
+    assert client.calls == [('xiaoruo_browser_task_status', {'task_id': 'xr-12345-4'})]
+    assert 'data' not in result and 'images' not in result
+
+
+@pytest.mark.parametrize('changes,is_error', [
+    ({'id': 'xr-12345-other'}, False), ({'taskId': 'xr-12345-other'}, False),
+    ({'state': 'unexpected'}, False), ({'state': []}, False), ({}, True),
+])
+async def test_status_rejects_mismatched_or_invalid_receipts_before_saving_pixels(adapter, changes, is_error):
+    value, _, client = adapter
+
+    async def status(name, arguments, timeout):
+        return {'structured': {'task': {'id': 'xr-12345-4', 'action': 'screenshot', 'state': 'succeeded', **changes}},
+                'is_error': is_error,
+                'images': [{'mimeType': 'image/png', 'data': base64.b64encode(PNG).decode()}]}
+
+    client.call_tool = status
+    result = await call(value, 'task_status', {'task_id': 'xr-12345-4'})
+    assert not result['verified'] and result['error']['code'] == 'native_task_status_invalid'
+    assert result['action_may_have_run'] and not (value.data_root / 'browser_screenshots').exists()
+
+
+@pytest.mark.parametrize('task', [
+    {'state': 'running', 'action': 'screenshot'},
+    {'state': 'timed_out', 'action': 'screenshot'},
+    {'state': 'succeeded', 'action': 'screenshot', 'errorCode': 'timeout'},
+    {'state': 'succeeded', 'action': 'read_page'},
+    {'state': 'succeeded'},
+])
+async def test_status_never_invents_pixels_or_capture_success(adapter, task):
+    value, _, client = adapter
+
+    async def status(name, arguments, timeout):
+        return {'structured': {'task': {'id': 'xr-12345-4', **task}},
+                'images': [{'mimeType': 'image/png', 'data': base64.b64encode(PNG).decode()}]}
+
+    client.call_tool = status
+    result = await call(value, 'task_status', {'task_id': 'xr-12345-4'})
+    assert result['verified'] and 'path' not in result
+    assert result['native_task_succeeded'] == (task['state'] == 'succeeded' and not task.get('errorCode'))
+    assert not (value.data_root / 'browser_screenshots').exists()
+
+
+async def test_consumed_capture_keeps_valid_task_receipt_without_inventing_pixels(adapter):
+    value, _, client = adapter
+
+    async def status(name, arguments, timeout):
+        return {'structured': {'task': {'id': 'xr-12345-4', 'action': 'screenshot', 'state': 'succeeded'}}, 'images': []}
+
+    client.call_tool = status
+    result = await call(value, 'task_status', {'task_id': 'xr-12345-4'})
+    assert result['verified'] and result['native_task_succeeded'] and result['native_terminal']
+    assert result['capture_pixels_available'] is False and 'recovered_from_task_status' not in result
+    assert 'path' not in result
 
 
 async def test_lightpanda_page_pixels_unsupported_but_explicit_active_window_is_distinct(adapter):
@@ -397,3 +473,128 @@ async def test_single_client_busy_still_discovers_instance_and_never_uses_extens
     assert instance['busy'] is True and instance['native_pid'] == 12345
     assert instance['supported_actions'] == ['status', 'list_tabs', 'task_status']
     assert not client.calls
+
+
+def _run_dom_observation(selector, nodes):
+    """Execute the shipped helper against local DOM objects, without a browser."""
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('existing node runtime unavailable')
+    harness = r'''
+const {script,nodes}=JSON.parse(require('fs').readFileSync(0,'utf8'));
+class FixtureElement {
+ constructor(spec){
+  this.localName=spec.tag||'span';this.nodeType=1;this.id=spec.id||'';this.type=spec.type||'';
+  this.innerText=spec.text||'';this.disabled=false;this.labels=[];this.parentElement=null;
+  this.previousElementSibling=null;this.attributes={...spec.attributes};this.spec=spec;
+  if(spec.shadow)this.shadowRoot=new FixtureRoot(spec.shadow);
+  if(spec.frame)this.contentDocument=new FixtureRoot(spec.frame);
+ }
+ getAttribute(name){return this.attributes[name]??null;}
+ hasAttribute(name){return Object.hasOwn(this.attributes,name);}
+ getBoundingClientRect(){return {width:this.spec.hidden?0:100,height:this.spec.hidden?0:20};}
+ getRootNode(){return this.root;}
+ get value(){if(this.type==='password'||this.type==='hidden')throw new Error('sensitive input value must not be read');return this.spec.value;}
+ setAttribute(){throw new Error('DOM mutation forbidden');}
+ removeAttribute(){throw new Error('DOM mutation forbidden');}
+ dispatchEvent(){throw new Error('DOM events forbidden');}
+ focus(){throw new Error('focus forbidden');}
+}
+function matches(el,part){
+ if(part==='*')return true;
+ if(/^#[\w-]+$/.test(part))return el.id===part.slice(1);
+ if(/^\.[\w-]+$/.test(part))return String(el.getAttribute('class')||'').split(/\s+/).includes(part.slice(1));
+ if(part==='input:not([type="hidden"])')return el.localName==='input'&&el.type!=='hidden';
+ const parsed=/^([\w-]+)?(?:\[([\w-]+)(?:="([^"]*)")?\])?$/.exec(part);
+ if(!parsed||(!parsed[1]&&!parsed[2]))throw new SyntaxError('unsupported fixture selector');
+ if(parsed[1]&&el.localName!==parsed[1])return false;
+ if(!parsed[2])return true;
+ const value=parsed[2]==='type'?el.type:el.getAttribute(parsed[2]);
+ return parsed[3]===undefined?value!==null:value===parsed[3];
+}
+class FixtureRoot {
+ constructor(specs){
+  this.nodes=specs.map(spec=>new FixtureElement(spec));
+  for(const el of this.nodes){el.root=this;Object.freeze(el.attributes);Object.freeze(el);}
+  Object.freeze(this.nodes);
+ }
+ querySelectorAll(selector){const parts=selector.split(',').map(part=>part.trim());return this.nodes.filter(el=>parts.some(part=>matches(el,part)));}
+}
+const document=new FixtureRoot(nodes);document.title='Local observation fixture';document.body={innerText:'Fixture'};
+Object.defineProperty(document,'cookie',{get(){throw new Error('cookie access forbidden');}});
+const context={document,location:{href:'https://example.test/manager'},CSS:{escape:value=>value},
+ getComputedStyle:el=>({display:el.spec.hidden?'none':'block',visibility:'visible',cursor:'auto',backgroundImage:'none'})};
+const observed=require('vm').runInNewContext(script,context,{timeout:1000});
+process.stdout.write(observed);
+'''
+    generated = _cef_helper_script('read_dom', {'selector': selector, 'max_chars': 1000})
+    result = subprocess.run([node, '-e', harness],
+                            input=json.dumps({'script': generated, 'nodes': nodes}, ensure_ascii=True),
+                            encoding='utf-8', capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_actual_dom_observation_describes_explicit_plain_text_match_without_mutation():
+    observed = _run_dom_observation('#draft-count', [{'id': 'draft-count', 'text': '草稿1'}])
+    assert observed['elements'] == []
+    assert observed['selector_match_count'] == 1 and observed['selector_is_file'] is False
+    assert observed['selected_elements'][0]['selector'] == '#draft-count'
+    assert observed['selected_elements'][0]['name'] == '草稿1'
+    assert observed['selected_elements'][0]['scope'] == 'main'
+    assert observed['selected_elements'][0]['visible'] is True
+    assert observed['selected_elements_truncated'] is False and observed['observation_complete'] is True
+
+
+def test_actual_dom_observation_selected_metadata_keeps_password_value_redacted():
+    observed = _run_dom_observation('#password', [{'tag': 'input', 'id': 'password', 'type': 'password',
+                                                  'text': 'password-must-not-leak', 'value': 'password-must-not-leak'}])
+    assert observed['selector_match_count'] == 1
+    selected = observed['selected_elements'][0]
+    assert selected['selector'] == '#password' and selected['type'] == 'password'
+    assert 'value' not in selected and selected['name'] == ''
+    assert 'password-must-not-leak' not in json.dumps(observed)
+
+
+@pytest.mark.parametrize('selector', ['#csrf', '*'])
+def test_actual_dom_observation_selected_metadata_never_reads_hidden_token_value(selector):
+    observed = _run_dom_observation(selector, [{'tag': 'input', 'id': 'csrf', 'type': 'hidden', 'hidden': True,
+                                               'attributes': {'name': 'csrf_token'}, 'value': 'auth-token-must-not-leak'}])
+    selected = observed['selected_elements'][0]
+    assert selected['selector'] == '#csrf' and selected['type'] == 'hidden'
+    assert selected['name'] == 'csrf_token' and selected['visible'] is False and 'value' not in selected
+    assert 'auth-token-must-not-leak' not in json.dumps(observed)
+
+
+def test_actual_dom_observation_selected_metadata_preserves_accessible_root_scope():
+    observed = _run_dom_observation('.chosen', [
+        {'id': 'main-count', 'text': 'Main draft', 'attributes': {'class': 'chosen'}},
+        {'tag': 'div', 'id': 'shadow-host', 'shadow': [
+            {'id': 'shadow-count', 'text': 'Shadow draft', 'attributes': {'class': 'chosen'}}]},
+        {'tag': 'iframe', 'id': 'frame-host', 'frame': [
+            {'id': 'frame-count', 'text': 'Frame draft', 'attributes': {'class': 'chosen'}}]},
+    ])
+    assert observed['selector_match_count'] == 3
+    assert [(item['selector'], item['scope']) for item in observed['selected_elements']] == [
+        ('#main-count', 'main'), ('#shadow-count', 'main / open-shadow'),
+        ('#frame-count', 'main / same-origin-frame')]
+
+
+@pytest.mark.parametrize('count,truncated', [(64, False), (65, True)])
+def test_actual_dom_observation_bounds_selected_metadata_without_hiding_file_coverage(count, truncated):
+    nodes = [{'id': 'draft-' + str(index), 'text': 'Draft', 'attributes': {'class': 'chosen'}} for index in range(count)]
+    nodes.append({'tag': 'input', 'id': 'video', 'type': 'file'})
+    observed = _run_dom_observation('.chosen', nodes)
+    assert observed['selector_match_count'] == count and len(observed['selected_elements']) == 64
+    assert observed['selected_elements_truncated'] is truncated and observed['truncated'] is truncated
+    assert observed['observation_complete'] is True and observed['file_inputs'][0]['selector'] == '#video'
+
+
+async def test_bounded_selector_read_exposes_selected_metadata_through_adapter(adapter):
+    value, _, client = adapter
+    selected = [{'selector': '#draft-count', 'tag': 'span', 'name': '草稿1', 'scope': 'main', 'visible': True}]
+    client.helper_results['read_dom'].update(selected_elements=selected, selected_elements_truncated=False,
+                                           selector_match_count=1, selector_is_file=False)
+    result = await call(value, 'read_page', {'tab_id': '7', 'selector': '#draft-count', 'max_chars': 1000})
+    assert result['selected_elements'] == selected and result['selected_elements_truncated'] is False
+    assert client.helper_calls == [('read_dom', {'selector': '#draft-count', 'max_chars': 1000})]

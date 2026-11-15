@@ -11,7 +11,7 @@ from datetime import date as CalendarDate, datetime, timedelta, timezone
 from pathlib import Path
 
 
-VIDEO_ROOT = Path(os.getenv("WEB_AGENT_VIDEO_ROOT", str(Path.home() / "Videos" / "FreeChatMCP")))
+VIDEO_ROOT = Path(os.environ.get("WEB_AGENT_MEDIA_ROOT") or Path.home() / "Videos" / "FreeChatMCP")
 MCP_ROOT = Path(__file__).resolve().parents[2]
 SHANGHAI = timezone(timedelta(hours=8), "Asia/Shanghai")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
@@ -54,6 +54,8 @@ def video_project_path(date: str | None = None, create: bool = False) -> dict[st
             attributes = getattr(part.lstat(), "st_file_attributes", 0)
         except FileNotFoundError:
             continue
+        except NotADirectoryError as exc:
+            raise ValueError("video project parent is not a directory") from exc
         if attributes & _REPARSE_POINT:
             raise ValueError("video project paths cannot use links or reparse points")
     resolved_root = root.resolve()

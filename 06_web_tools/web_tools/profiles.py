@@ -8,13 +8,14 @@ import shlex
 import shutil
 import sys
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from web_mcp.paths import WorkspaceViolation, resolve_workspace_path
 from web_config.settings import Settings
+from .python_runtime import resolve_python_runtime
 
 
 @dataclass(slots=True)
@@ -23,6 +24,8 @@ class RunnerCommand:
     cwd: Path
     timeout: int
     description: str
+    details: dict[str, Any] = field(default_factory=dict)
+    environment: dict[str, str] | None = None
 
 
 def _bounded_timeout(payload: dict[str, Any], settings: Settings) -> int:
@@ -277,10 +280,12 @@ def _normalize_workflow_name(value: Any, default: str = "diagnostics") -> str:
 def python_command(payload: dict[str, Any], settings: Settings, task_id: str) -> RunnerCommand:
     script_path = payload.get("script_path")
     code = payload.get("code")
+    if script_path and code:
+        raise ValueError("Provide script_path or code, not both")
     if script_path:
         script = resolve_workspace_path(str(script_path), settings.allowed_workspaces, must_exist=True)
-        if script.suffix.lower() != ".py":
-            raise ValueError("run_python_script only accepts .py files")
+        if script.suffix.lower() not in {".py", ".ipynb"}:
+            raise ValueError("run_python_script accepts .py or Python .ipynb files")
         try:
             script_source = script.read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
@@ -295,8 +300,48 @@ def python_command(payload: dict[str, Any], settings: Settings, task_id: str) ->
         script.write_text(code, encoding="utf-8")
     else:
         raise ValueError("Provide script_path or code")
-    cwd = resolve_workspace_path(str(payload.get("cwd", ".")), settings.allowed_workspaces, must_exist=True)
-    return RunnerCommand([sys.executable, str(script), *_safe_args(payload)], cwd, _bounded_timeout(payload, settings), f"Python: {script.name}")
+    # File-based work defaults to its own directory, matching Notebook data
+    # paths and project environment discovery. Inline code retains workspace cwd.
+    cwd_value = payload.get("cwd")
+    if not cwd_value or cwd_value == ".":
+        cwd_value = str(script.parent) if script_path else "."
+    cwd = resolve_workspace_path(str(cwd_value), settings.allowed_workspaces, must_exist=True)
+    if not cwd.is_dir():
+        raise ValueError("Python cwd must be a directory")
+    runtime = resolve_python_runtime(payload, settings, cwd)
+    timeout = _bounded_timeout(payload, settings)
+    environment = dict(os.environ)
+    for key in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV"):
+        environment.pop(key, None)
+    environment.update(PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    if runtime.get("user_base"):
+        # A LocalSystem worker has a different user site from the interactive
+        # VS Code user. Reuse the configured user's existing packages only for
+        # that selected runtime, without changing either installation.
+        environment["PYTHONUSERBASE"] = runtime["user_base"]
+    details = {"python_executable": runtime["executable"], "python_selection": runtime["source"], "cwd": str(cwd)}
+    if runtime.get("user_base"):
+        details["python_user_base"] = runtime["user_base"]
+    if script.suffix.lower() == ".ipynb":
+        if _safe_args(payload):
+            raise ValueError("Notebook execution does not accept script args")
+        notebook = json.loads(script_source)
+        if not isinstance(notebook, dict) or notebook.get("nbformat") != 4:
+            raise ValueError("Only Jupyter Notebook v4 files are supported")
+        language = notebook.get("metadata", {}).get("kernelspec", {}).get("language", "python")
+        if str(language).lower() not in {"python", "python3"}:
+            raise ValueError("Only Python notebooks are supported")
+        output_dir = settings.task_output_root / task_id
+        command = [sys.executable, str(Path(__file__).with_name("notebook_execute.py")),
+                   "--notebook", str(script), "--python", runtime["executable"],
+                   "--cwd", str(cwd), "--output-dir", str(output_dir), "--timeout", str(timeout)]
+        details.update(notebook_input=str(script), notebook_output=str(output_dir / "executed.ipynb"),
+                       notebook_report=str(output_dir / "notebook-execution.json"))
+        description = f"Notebook: {script.name}; kernel={runtime['executable']} ({runtime['source']}); output={output_dir}"
+    else:
+        command = [runtime["executable"], str(script), *_safe_args(payload)]
+        description = f"Python: {script.name}; interpreter={runtime['executable']} ({runtime['source']})"
+    return RunnerCommand(command, cwd, timeout, description, details, environment)
 
 
 def _windows_to_wsl(path: Path) -> str:
@@ -399,8 +444,53 @@ def _shell_commands(
     return workflow, normalized
 
 
-def _shell_cwd(payload: dict[str, Any], settings: Settings) -> Path:
-    return resolve_workspace_path(str(payload.get("cwd", ".")), settings.allowed_workspaces, must_exist=True)
+def _terminal_runtime_options(settings: Settings) -> dict[str, Any]:
+    """Load the terminal-only identity/profile settings without changing other runners."""
+    configured_path = settings.extra.get("terminal_runtime_config")
+    path = Path(configured_path) if configured_path else settings.project_root / "07_web_config" / "terminal_runtime.json"
+    options: dict[str, Any] = {
+        "execution_context": "service",
+        "default_cwd": None,
+        "load_powershell_profile": False,
+    }
+    if not path.exists():
+        return options
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Terminal runtime configuration could not be read") from exc
+    allowed = set(options)
+    if not isinstance(raw, dict) or set(raw) - allowed:
+        raise ValueError("Terminal runtime configuration contains unsupported fields")
+    context = raw.get("execution_context", "service")
+    if context not in {"service", "active_user"}:
+        raise ValueError("Terminal execution_context must be service or active_user")
+    load_profile = raw.get("load_powershell_profile", False)
+    if not isinstance(load_profile, bool):
+        raise ValueError("Terminal load_powershell_profile must be a boolean")
+    default_cwd = raw.get("default_cwd")
+    if default_cwd is not None:
+        if not isinstance(default_cwd, str) or not default_cwd.strip() or not Path(default_cwd).is_absolute():
+            raise ValueError("Terminal default_cwd must be an absolute directory path")
+        default_cwd = resolve_workspace_path(default_cwd, settings.allowed_workspaces, must_exist=True)
+        if not default_cwd.is_dir():
+            raise ValueError("Terminal default_cwd must be a directory")
+    options.update(execution_context=context, default_cwd=default_cwd, load_powershell_profile=load_profile)
+    return options
+
+
+def _shell_cwd(payload: dict[str, Any], settings: Settings, options: dict[str, Any]) -> Path:
+    raw = payload.get("cwd")
+    if raw is not None and not isinstance(raw, str):
+        raise ValueError("Terminal cwd must be a directory path")
+    requested = raw.strip() if raw else "."
+    default_cwd = options["default_cwd"]
+    if default_cwd is not None and not Path(requested).is_absolute():
+        requested = str(default_cwd / (requested or "."))
+    cwd = resolve_workspace_path(requested or ".", settings.allowed_workspaces, must_exist=True)
+    if not cwd.is_dir():
+        raise ValueError("Terminal cwd must be a directory")
+    return cwd
 
 
 def _powershell_executable() -> str:
@@ -422,19 +512,25 @@ def powershell_command(payload: dict[str, Any], settings: Settings, task_id: str
         },
         "PowerShell",
     )
-    cwd = _shell_cwd(payload, settings)
-    script = "$ErrorActionPreference = 'Stop'\n" + "\n".join(commands)
-    command = [
-        _powershell_executable(),
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    ]
-    return RunnerCommand(command, cwd, _bounded_timeout(payload, settings), f"PowerShell workflow: {workflow}")
+    options = _terminal_runtime_options(settings)
+    cwd = _shell_cwd(payload, settings, options)
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n"
+        "[Console]::OutputEncoding = $OutputEncoding\n"
+        + "\n".join(commands)
+    )
+    command = [_powershell_executable(), "-NoLogo"]
+    if not options["load_powershell_profile"]:
+        # Preserve the legacy isolated workflow when profile loading is disabled.
+        command.extend(["-NoProfile", "-ExecutionPolicy", "Bypass"])
+    command.extend(["-NonInteractive", "-Command", script])
+    details = {
+        "execution_context": options["execution_context"],
+        "powershell_profile_loaded": options["load_powershell_profile"],
+        "working_directory": str(cwd),
+    }
+    return RunnerCommand(command, cwd, _bounded_timeout(payload, settings), f"PowerShell workflow: {workflow}", details)
 
 
 def _cmd_executable() -> str:
@@ -452,12 +548,14 @@ def cmd_command(payload: dict[str, Any], settings: Settings, task_id: str) -> Ru
         },
         "CMD",
     )
-    cwd = _shell_cwd(payload, settings)
+    options = _terminal_runtime_options(settings)
+    cwd = _shell_cwd(payload, settings, options)
     # Pass one command string to cmd.exe. Using /s with embedded newlines can
     # make cmd.exe stop after the first command when launched by CreateProcess.
     script = " & ".join(commands)
     command = [_cmd_executable(), "/d", "/c", script]
-    return RunnerCommand(command, cwd, _bounded_timeout(payload, settings), f"CMD workflow: {workflow}")
+    details = {"execution_context": options["execution_context"], "working_directory": str(cwd)}
+    return RunnerCommand(command, cwd, _bounded_timeout(payload, settings), f"CMD workflow: {workflow}", details)
 
 
 def terminal_command(payload: dict[str, Any], settings: Settings, task_id: str) -> RunnerCommand:

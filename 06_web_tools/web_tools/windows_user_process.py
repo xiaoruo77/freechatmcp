@@ -287,6 +287,9 @@ if os.name == "nt":
         threads: list[threading.Thread] = []
         timed_out = False
         cancelled = False
+        created = False
+        exited = False
+        owned_create_time = None
 
         try:
             token = _active_user_token()
@@ -339,6 +342,8 @@ if os.name == "nt":
                 ctypes.byref(process_info),
             ):
                 raise _win32_error("CreateProcessAsUserW")
+            created = True
+            owned_create_time = _process_create_time(int(process_info.dwProcessId))
 
             _close_handle(stdin_handle)
             stdin_handle = None
@@ -359,18 +364,21 @@ if os.name == "nt":
             while True:
                 wait_result = _kernel32.WaitForSingleObject(process_info.hProcess, 200)
                 if wait_result == _WAIT_OBJECT_0:
+                    exited = True
                     break
                 if wait_result != _WAIT_TIMEOUT:
                     raise _win32_error("WaitForSingleObject")
                 if cancel_event is not None and cancel_event.is_set():
                     cancelled = True
+                    _terminate_owned_process_tree(int(process_info.dwProcessId), owned_create_time)
                     _kernel32.TerminateProcess(process_info.hProcess, 1)
                     break
                 if time.monotonic() >= deadline:
                     timed_out = True
+                    _terminate_owned_process_tree(int(process_info.dwProcessId), owned_create_time)
                     _kernel32.TerminateProcess(process_info.hProcess, 1)
                     break
-            _kernel32.WaitForSingleObject(process_info.hProcess, 5000)
+            exited = _kernel32.WaitForSingleObject(process_info.hProcess, 5000) == _WAIT_OBJECT_0
             exit_code = wintypes.DWORD()
             if not _kernel32.GetExitCodeProcess(process_info.hProcess, ctypes.byref(exit_code)):
                 raise _win32_error("GetExitCodeProcess")
@@ -378,6 +386,10 @@ if os.name == "nt":
                 thread.join(timeout=5)
             return UserProcessResult(int(exit_code.value), _decode(stdout_data[0] if stdout_data else b""), _decode(stderr_data[0] if stderr_data else b""), timed_out, cancelled)
         finally:
+            if created and not exited:
+                _terminate_owned_process_tree(int(process_info.dwProcessId), owned_create_time)
+                _kernel32.TerminateProcess(process_info.hProcess, 1)
+                _kernel32.WaitForSingleObject(process_info.hProcess, 1000)
             for thread in threads:
                 if thread.is_alive():
                     thread.join(timeout=1)
@@ -397,6 +409,60 @@ if os.name == "nt":
             _close_handle(token)
 
 
+def _process_create_time(pid: int | None) -> float | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    import psutil
+
+    try:
+        return psutil.Process(pid).create_time()
+    except psutil.Error:
+        return None
+
+
+def _terminate_owned_process_tree(pid: int, expected_create_time: float | None) -> bool:
+    """Stop only a still-matching launched process and its observed descendants.
+
+    The identity must have been captured immediately after creation. Never
+    discover roots by executable name, user account or an old unverified PID.
+    Failure is best effort so it cannot replace an original cancellation/error.
+    """
+    if expected_create_time is None:
+        return False
+    import psutil
+
+    try:
+        root = psutil.Process(pid)
+        if root.create_time() != expected_create_time:
+            return False
+        descendants = root.children(recursive=True)
+        # Each Process object caches its creation time; psutil checks identity
+        # again before signalling so recycled descendant PIDs are not touched.
+        owned = []
+        for child in reversed(descendants):
+            try:
+                child.create_time()
+                owned.append(child)
+            except psutil.Error:
+                pass
+        owned.append(root)
+        for process in owned:
+            try:
+                process.terminate()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(owned, timeout=3)
+        for process in alive:
+            try:
+                process.kill()
+            except psutil.Error:
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=3)
+        return not alive
+    except psutil.Error:
+        return False
+
+
 def run_command_as_active_user(
     command: Sequence[str],
     cwd: Path,
@@ -408,3 +474,97 @@ def run_command_as_active_user(
     if os.name != "nt":
         return _subprocess_fallback(command, cwd, timeout)
     return _run_as_active_user_windows(command, cwd, timeout, cancel_event)
+
+
+def run_background_command_as_active_user(
+    command: Sequence[str], cwd: Path, timeout: int | float = 10,
+) -> UserProcessResult:
+    """Start the no-output background launcher on the active user's desktop.
+
+    This deliberately does not share the WSL/batch output-capture path: Windows
+    cannot inherit stdio handles from the System service across sessions. The
+    launcher is noninteractive, but its window station/desktop must explicitly
+    be the logged-in user's WinSta0\\Default so its private-desktop broker can
+    create GUI children with the user's existing account context.
+    """
+    import math
+
+    if isinstance(command, (str, bytes)) or not command:
+        raise ValueError("command must be a nonempty argument sequence")
+    argv = [str(value) for value in command]
+    if any(not value or "\0" in value for value in argv):
+        raise ValueError("command arguments must be nonempty and contain no NUL")
+    if (type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("background launcher timeout must be finite and positive")
+    bounded_timeout = min(float(timeout), 30.0)
+
+    if os.name != "nt" or not is_local_system():
+        try:
+            completed = subprocess.run(
+                argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=bounded_timeout, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+            )
+            return UserProcessResult(int(completed.returncode), "", "")
+        except subprocess.TimeoutExpired:
+            return UserProcessResult(-1, "", "", timed_out=True)
+
+    token = None
+    environment = ctypes.c_void_p()
+    process_info = _ProcessInformation()
+    created = False
+    exited = False
+    timed_out = False
+    try:
+        token = _active_user_token()
+        if not _userenv.CreateEnvironmentBlock(ctypes.byref(environment), token, False):
+            raise _win32_error("CreateEnvironmentBlock")
+        executable = _executable(argv)
+        command_line = subprocess.list2cmdline([executable, *argv[1:]])
+        if len(command_line) >= 32767:
+            raise ValueError("background launcher command exceeds the Windows command-line bound")
+        buffer = ctypes.create_unicode_buffer(command_line)
+        startup = _StartupInfo()
+        startup.cb = ctypes.sizeof(_StartupInfo)
+        startup.lpDesktop = "winsta0\\default"
+        # No STARTF_USESTDHANDLES and no inheritable pipes/NUL handles from the
+        # System process. The user-side launcher opens its own DEVNULL handles.
+        if not _advapi32.CreateProcessAsUserW(
+            token, executable, buffer, None, None, False,
+            _CREATE_NEW_PROCESS_GROUP | _CREATE_UNICODE_ENVIRONMENT | _CREATE_NO_WINDOW,
+            environment, str(cwd), ctypes.byref(startup), ctypes.byref(process_info),
+        ):
+            raise _win32_error("CreateProcessAsUserW")
+        created = True
+        deadline = time.monotonic() + bounded_timeout
+        while True:
+            status = _kernel32.WaitForSingleObject(process_info.hProcess, 200)
+            if status == _WAIT_OBJECT_0:
+                exited = True
+                break
+            if status != _WAIT_TIMEOUT:
+                raise _win32_error("WaitForSingleObject")
+            if time.monotonic() >= deadline:
+                timed_out = True
+                if not _kernel32.TerminateProcess(process_info.hProcess, 1):
+                    raise _win32_error("TerminateProcess")
+                exited = _kernel32.WaitForSingleObject(process_info.hProcess, 5000) == _WAIT_OBJECT_0
+                break
+        exit_code = wintypes.DWORD()
+        if not _kernel32.GetExitCodeProcess(process_info.hProcess, ctypes.byref(exit_code)):
+            raise _win32_error("GetExitCodeProcess")
+        return UserProcessResult(int(exit_code.value) if exited else -1, "", "", timed_out=timed_out)
+    except Exception:
+        # This is only the newly created launcher process, never its detached
+        # broker or a user's existing application.
+        if created and not exited:
+            _kernel32.TerminateProcess(process_info.hProcess, 1)
+            _kernel32.WaitForSingleObject(process_info.hProcess, 1000)
+        raise
+    finally:
+        _close_handle(process_info.hThread)
+        _close_handle(process_info.hProcess)
+        if environment.value:
+            _userenv.DestroyEnvironmentBlock(environment)
+        _close_handle(token)

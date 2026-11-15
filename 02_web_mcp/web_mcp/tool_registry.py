@@ -165,7 +165,7 @@ def _compat_args(step: dict[str, Any]) -> dict[str, Any]:
 
 
 def _resolve_compat_value(value: Any, context: dict[str, Any]) -> Any:
-    """Resolve the reference form used by the Xiaoruo2 workflow examples."""
+    """Resolve the reference form used by the legacy workflow examples."""
 
     if isinstance(value, str) and value.startswith("$"):
         current: Any = context
@@ -1937,6 +1937,7 @@ class ToolRegistry:
                 self.specs[name].description = "Queue the explicitly requested deterministic operation; returns task_id immediately. Read task_status and bounded task output for the real result. ChatGPT chooses any next operation."
             self.specs["run_autonomous_workflow"].description = "Compatibility name for an explicit finite workflow.steps batch. A goal without steps returns needs_chatgpt_planning. No server-side sampling or hidden planning."
             self.specs["run_workflow"].description = self.specs["run_autonomous_workflow"].description
+            self.specs["run_python_script"].description += " Python .py/code and .ipynb use the project or configured user interpreter; python_executable overrides it ('service' selects maintenance Python). Notebook outputs are separate task artifacts, never the input file or an existing VS Code kernel."
             self.specs["run_workflow_until_complete"].description = "Queue explicit runner steps and final_checks in SQLite; returns task_id promptly for task_status."
             self.specs["monitor_task"].description = "Return the current task snapshot immediately. queued/running is normal; inspect the recorded terminal result when ready."
             self.specs["wait_task"].description = "Wait at most five seconds for an existing deterministic task, then return its real status."
@@ -2298,9 +2299,24 @@ class ToolRegistry:
         except BrowserBridgeError as exc:
             if name.startswith("browser_"):
                 if self.chatgpt_direct:
-                    result = {"status": "failed", "terminal": True, "completed": False,
-                              "error": _redact_compat_text(exc), "error_code": "browser_bridge_error",
-                              "retryable": True, "suggested_next_tool": "browser_list_tabs"}
+                    code = getattr(exc, "code", "browser_bridge_error")
+                    browser_write = (name == "browser_control" and arguments.get("action") in {
+                        "open_tab", "close_tab", "activate_tab", "navigate", "click", "type", "press", "select", "scroll", "upload_file"}) or name in {
+                        "browser_open_tab", "browser_start", "browser_navigate", "browser_click", "browser_type", "browser_press", "browser_select_option", "browser_close_tab", "browser_upload_file"}
+                    # An HTTP/protocol failure after a write may hide an
+                    # already dispatched action. Only local credential or
+                    # explicit pre-dispatch request rejection proves no effect.
+                    known_no_effect = code in {"browser_bridge_credentials_unavailable", "browser_bridge_authentication_failed", "browser_bridge_request_rejected"}
+                    uncertain = browser_write and not known_no_effect
+                    result = {"ok": False, "status": "outcome_unknown" if uncertain else "failed", "terminal": True, "completed": False,
+                              "error": _redact_compat_text(exc), "error_code": code,
+                              "retryable": bool(getattr(exc, "retryable", True)) and not uncertain,
+                              "suggested_next_tool": "browser_control" if uncertain else "browser_list_tabs",
+                              "evidence": {"executed": None if uncertain else False, "verified": False}}
+                    if uncertain:
+                        result["recovery"] = {"operation_id": arguments.get("operation_id"),
+                            "browser_id": arguments.get("browser_id"), "tab_id": arguments.get("tab_id"),
+                            "next_steps": ["status", "read"], "repeat_write_allowed": False}
                 else:
                     result = self._browser_failure_result(name, arguments, exc)
             else:
@@ -2783,6 +2799,13 @@ class ToolRegistry:
             "admin_mode": self.ctx.settings.admin_mode,
             "memory": memory,
             "disk": disk,
+            "browser_mcp_access": {
+                "preferred_native_tools": ["browser_instances", "browser_control"],
+                "native_upload_action": "upload_file",
+                "cached_host_entrypoint": "run_workflow",
+                "example": {"workflow": {"steps": [{"tool": "browser_instances", "arguments": {}}]}},
+                "note": "Use the same registered tool through explicit workflow.steps if the host cached an older tool list. Permissions, takeover checks and receipts remain enforced. No script or additional model is used.",
+            },
         }
 
     async def _list_processes(self, name_contains: str | None = None, limit: int = 100) -> dict[str, Any]:
@@ -4176,8 +4199,8 @@ class ToolRegistry:
         # the actual terminal hand-off behavior for success/irrecoverable error.
         return await self._finished_task_result(profile, payload, current)
 
-    async def _run_python_script(self, script_path: str | None = None, args: list[str] | None = None, cwd: str = ".", timeout: int | None = None, code: str | None = None) -> dict[str, Any]:
-        payload = {"script_path": script_path, "args": args or [], "cwd": cwd, "timeout": timeout, "code": code}
+    async def _run_python_script(self, script_path: str | None = None, args: list[str] | None = None, cwd: str = ".", timeout: int | None = None, code: str | None = None, python_executable: str | None = None) -> dict[str, Any]:
+        payload = {"script_path": script_path, "args": args or [], "cwd": cwd, "timeout": timeout, "code": code, "python_executable": python_executable}
         payload = {key: value for key, value in payload.items() if value is not None}
         return await self._run_task_until_complete("python_script", payload)
 
@@ -5086,7 +5109,7 @@ class ToolRegistry:
         elif action == "python":
             result = await self._run_python_script(
                 script_path=args.get("script_path"), args=args.get("args") or [], cwd=str(args.get("cwd", ".")),
-                timeout=args.get("timeout"), code=args.get("code"),
+                timeout=args.get("timeout"), code=args.get("code"), python_executable=args.get("python_executable"),
             )
         elif action == "powershell":
             result = await self._run_powershell_workflow(
@@ -5194,8 +5217,9 @@ class ToolRegistry:
                     "terminal": "terminal_workflow", "wsl": "wsl_workflow", "project_build": "project_build",
                     "md_simulation": "md_simulation", "production_md": "production_md"}
         safe_tools = {"list_directory", "get_path_info", "create_directory", "read_file", "write_file", "patch_file",
-                      "copy_path", "move_path", "delete_path", "search_file", "find_paths", "inspect_project"}
+                      "copy_path", "move_path", "delete_path", "search_file", "find_paths", "inspect_project", "video_project_path"}
         safe_tools.update(name for name in self.specs if name.startswith("browser_"))
+        safe_tools.update({"background_desktop", "vscode_background", "todesk_control", "remote_computer"})
         tool_aliases = {"browser_read": "browser_read_page"}
         planned: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         runner_steps: list[dict[str, Any]] = []
@@ -5229,12 +5253,20 @@ class ToolRegistry:
             tool = tool_aliases.get(action, action)
             if tool not in safe_tools:
                 raise ValueError(f"Unsupported direct batch action: {action}; call its dedicated tool explicitly")
-            inspect.signature(getattr(self, f"_{tool}")).bind(**args)
+            owner = self.direct_tools if tool in {"background_desktop", "vscode_background", "todesk_control", "remote_computer"} else self
+            inspect.signature(getattr(owner, f"_{tool}")).bind(**args)
             planned.append((tool, args, step))
         if runner_steps:
             if planned:
                 raise ValueError("Split mixed runner/tool batches into host tool calls; no operation was started")
             return await self._run_workflow_until_complete(runner_steps, checks, overall_timeout=timeout_seconds)
+        if any(tool == "remote_computer" for tool, _, _ in planned):
+            if len(planned) != 1 or checks:
+                raise ValueError("Use one remote_computer call at a time; inspect its receipt before the next action")
+            # This is a dedicated-tool alias, not a synchronous batch. UU
+            # setup may outlast the batch's 30-second budget. Preserve the
+            # tool envelope and let its own bounded transport enforce timeouts.
+            return await self.invoke("remote_computer", planned[0][1])
         records: list[dict[str, Any]] = []
         context: dict[str, Any] = {"steps": {}, "last": {}}
         deadline = asyncio.get_running_loop().time() + max(1, min(int(timeout_seconds), 30))
@@ -6319,7 +6351,7 @@ class ToolRegistry:
             await asyncio.sleep(seconds)
             return {"slept_seconds": seconds}
         if action == "python":
-            return await self._run_python_script(code=str(args.get("code", args.get("script", ""))), cwd=str(args.get("cwd", ".")), timeout=int(args.get("timeout", 120)))
+            return await self._run_python_script(script_path=args.get("script_path"), code=args.get("code", args.get("script")), args=args.get("args"), cwd=str(args.get("cwd", ".")), timeout=int(args.get("timeout", 120)), python_executable=args.get("python_executable"))
         if action == "powershell":
             return await self._run_powershell_workflow(workflow="custom", commands=[str(args.get("code", args.get("command", "")))], cwd=str(args.get("cwd", ".")), timeout=int(args.get("timeout", 120)))
         if action == "cmd":

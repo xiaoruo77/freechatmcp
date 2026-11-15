@@ -73,6 +73,7 @@ def normalize_result(operation: str, value: Any) -> dict[str, Any]:
         return {**_diagnostics(value), "operation": operation}
     raw = _diagnostics(dict(value) if isinstance(value, dict) else {"items": value} if isinstance(value, list) else {"value": value})
     status = str(raw.get("status") or "").lower()
+    browser_checkpoint = operation.startswith("browser_") and status in {"outcome_unknown", "dispatched_unverified"}
     task_id = raw.get("task_id") or (raw.get("id") if str(raw.get("id", "")).startswith("task_") else None)
     # Existing repositories use task-... on some deployments.
     if not task_id and str(raw.get("id", "")).startswith("task-"):
@@ -90,13 +91,13 @@ def normalize_result(operation: str, value: Any) -> dict[str, Any]:
     elif active:
         # Queuing is a successful request; it provides no execution proof yet.
         failed = False
-    elif failed:
+    elif failed and not browser_checkpoint:
         status = "failed"
-    elif status not in {"cancelled", "blocked"}:
+    elif not browser_checkpoint and status not in {"cancelled", "blocked"}:
         status = "completed"
     terminal = not (active or planning)
     code = raw.get("error_code") or raw.get("error_class") or (error.get("code") if isinstance(error, dict) else None) or ("operation_failed" if failed else None)
-    message = safe_error(error) if error else ("Operation failed; inspect returned evidence" if failed else None)
+    message = safe_error(error.get("message") or error.get("code") or "Operation failed") if isinstance(error, dict) else safe_error(error) if error else ("Operation failed; inspect returned evidence" if failed else None)
     evidence = raw.get("evidence")
     if not isinstance(evidence, dict):
         evidence = {"checks": raw.get("checks") or raw.get("acceptance_results") or []}
@@ -122,4 +123,8 @@ def normalize_result(operation: str, value: Any) -> dict[str, Any]:
         result["suggested_next_tool"] = "task_status"
     elif planning:
         result["suggested_next_tool"] = "goal_start"
+    elif operation.startswith("browser_") and (browser_checkpoint or code == "browser_target_fenced"):
+        result["suggested_next_tool"] = "browser_control"
+        result["continuation_required"] = True
+        result["repeat_write_allowed"] = False
     return result

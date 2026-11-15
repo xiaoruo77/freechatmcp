@@ -2,6 +2,7 @@
 import asyncio
 import ctypes
 import json
+import os
 import time
 from types import SimpleNamespace
 
@@ -90,6 +91,10 @@ class Transport:
                 task = {"id": "xr-123-1", "state": state, "errorCode": "", "error": ""}
                 if state == "failed":
                     task.update(errorCode="unsupported", error="Explicitly unsupported", retryable=True)
+                elif state == "timed_out":
+                    task.update(errorCode="task_timeout", error="Native task deadline expired")
+                elif state == "cancelled":
+                    task.update(errorCode="task_cancelled", error="Native task was cancelled")
                 result = self.tool_result({"task": task}, images=state == "succeeded")
             else:
                 result = self.tool_result({"tabs": [], "authToken": TOKEN, "pipeName": PIPE,
@@ -111,11 +116,11 @@ class Transport:
         self.closed = True
 
 
-def fake_client(discovery, **options):
+def fake_client(discovery, *, transport_class=Transport, **options):
     instance = discovery.service.discover()[0]
     opened = []
     def factory(instance, deadline):
-        transport = Transport(instance, deadline, **options)
+        transport = transport_class(instance, deadline, **options)
         opened.append(transport)
         return transport
     return ipc.NativeBrowserClient(instance, transport_factory=factory, lease_factory=Lease), opened
@@ -186,6 +191,110 @@ def test_discovery_rejects_reparse_metadata(discovery, monkeypatch):
     assert discovery.service.discover() == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows discovery sharing semantics")
+def test_discovery_reads_while_publisher_has_write_handle(discovery):
+    api = ipc._kernel()
+    # A cooperative publisher allows reads but already owns write access. A
+    # reader that only grants FILE_SHARE_READ cannot coexist with this handle.
+    writer = api.CreateFileW(str(discovery.path), 0x40000000, 7, None, 3, 0, None)
+    assert writer != ctypes.c_void_p(-1).value
+    try:
+        reader = api.CreateFileW(str(discovery.path), 0x80000000, 1, None, 3, 0x00200000, None)
+        if reader != ctypes.c_void_p(-1).value:
+            api.CloseHandle(reader)
+            pytest.fail("A read-only sharing mode unexpectedly coexisted with a writer")
+        assert ctypes.get_last_error() == 32
+        assert len(discovery.service.discover()) == 1
+        assert discovery.service.last_diagnostics == []
+    finally:
+        api.CloseHandle(writer)
+
+
+def test_discovery_retries_changed_snapshot_and_clears_old_diagnostics(discovery, monkeypatch):
+    original = ipc._read_discovery
+    calls = []
+    def publishing(path):
+        calls.append(path)
+        if len(calls) == 1:
+            raise ipc._DiscoveryReadError("discovery_changed", retryable=True)
+        return original(path)
+    monkeypatch.setattr(ipc, "_read_discovery", publishing)
+    discovery.service.last_diagnostics = [{"code": "previous_rejection"}]
+    assert len(discovery.service.discover()) == 1
+    assert len(calls) == 2 and discovery.service.last_diagnostics == []
+
+
+def test_discovery_retries_partial_json_without_skipping_identity_checks(discovery, monkeypatch):
+    original = ipc._read_discovery
+    complete = discovery.path.read_bytes()
+    calls = []
+    def publishing(path):
+        calls.append(path)
+        path.write_bytes(b'{"schema":' if len(calls) == 1 else complete)
+        return original(path)
+    monkeypatch.setattr(ipc, "_read_discovery", publishing)
+    discovery.process.exe = lambda: str(discovery.root / "wrong.exe")
+    assert discovery.service.discover() == []
+    assert len(calls) == 2
+    assert discovery.service.last_diagnostics == [
+        {"code": "discovery_executable_mismatch", "process_id": 123}]
+
+
+def test_discovery_transient_failure_is_bounded_and_secret_free(discovery, monkeypatch):
+    calls = []
+    def busy(path):
+        calls.append(path)
+        raise ipc._DiscoveryReadError("discovery_sharing_violation", retryable=True)
+    monkeypatch.setattr(ipc, "_read_discovery", busy)
+    assert discovery.service.discover() == []
+    assert len(calls) == 3
+    assert discovery.service.last_diagnostics == [{"code": "discovery_sharing_violation"}]
+    def denied(path):
+        calls.append(path)
+        raise PermissionError(TOKEN + PIPE)
+    calls.clear()
+    monkeypatch.setattr(ipc, "_read_discovery", denied)
+    assert discovery.service.discover() == [] and len(calls) == 1
+    assert discovery.service.last_diagnostics == [{"code": "discovery_access_denied"}]
+    assert TOKEN not in repr(discovery.service.last_diagnostics)
+    assert PIPE not in repr(discovery.service.last_diagnostics)
+
+
+def test_discovery_retry_budget_is_shared_across_files(discovery, monkeypatch):
+    for pid in range(124, 144):
+        (discovery.root / f"browser-{pid}-456.json").touch()
+    clock, calls, sleeps = [0.0], [], []
+    def busy(path):
+        calls.append(path)
+        raise ipc._DiscoveryReadError("discovery_changed", retryable=True)
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+    monkeypatch.setattr(ipc, "_read_discovery", busy)
+    monkeypatch.setattr(ipc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ipc.time, "sleep", sleep)
+    assert discovery.service.discover() == []
+    assert sum(sleeps) <= ipc._DISCOVERY_RETRY_BUDGET
+    assert len(calls) <= 21 + 8
+
+
+def test_discovery_keeps_process_creation_gate_and_reports_reason(discovery):
+    discovery.process.create_time = lambda: time.time() + 100
+    assert discovery.service.discover() == []
+    assert discovery.service.last_diagnostics == [
+        {"code": "discovery_predates_process", "process_id": 123}]
+
+
+def test_discovery_reports_service_user_path_difference_without_cross_user_scan(discovery, monkeypatch):
+    monkeypatch.delenv("WEB_AGENT_XIAORUO_IPC_DISCOVERY_ROOT", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(discovery.root / "system-profile"))
+    service = ipc.NativeBrowserDiscovery(trusted_executable=discovery.executable,
+                                        psutil_api=discovery.service._process_api)
+    assert service.discover() == []
+    assert service.last_diagnostics == [{"code": "discovery_root_missing"}]
+    assert len(discovery.service.discover()) == 1
+
+
 async def test_auth_initialize_notification_order_and_short_lived_pipe(discovery):
     client, opened = fake_client(discovery)
     result = await client.tabs()
@@ -240,7 +349,7 @@ async def test_task_acceptance_is_polled_to_terminal_on_one_connection(discovery
 
 async def test_accepted_task_timeout_keeps_id_and_never_resubmits(discovery):
     client, opened = fake_client(discovery, states=["accepted"])
-    result = await client.execute("navigate", {"tab_id": 2}, timeout=.15)
+    result = await client.execute("navigate", {"tab_id": 2}, timeout=1.3)
     assert not result["ok"] and result["status"] == "unknown" and result["task_id"] == "xr-123-1"
     assert result["error"]["code"] == "native_ipc_timeout" and not result["retryable"]
     starts = [item for item in opened[0].requests if item.get("params", {}).get("name") == "xiaoruo_browser_start_task"]
@@ -253,6 +362,135 @@ async def test_terminal_failure_preserves_native_reason_and_never_retries(discov
     assert not result["ok"] and result["status"] == "failed"
     assert result["error"]["code"] == "unsupported" and not result["retryable"]
     assert len(opened[0].requests) == 4
+
+
+@pytest.mark.parametrize(("state", "code"), [
+    ("timed_out", "task_timeout"), ("cancelled", "task_cancelled"),
+])
+async def test_native_terminal_timeout_and_cancellation_keep_task_id(discovery, state, code):
+    client, opened = fake_client(discovery, states=["accepted", state])
+    result = await client.execute("screenshot", {"tab_id": 2})
+    assert not result["ok"] and result["status"] == state
+    assert result["task_id"] == "xr-123-1" and result["error"]["code"] == code
+    assert not result["retryable"] and opened[0].closed
+    calls = [item["params"]["name"] for item in opened[0].requests if item["method"] == "tools/call"]
+    assert calls == ["xiaoruo_browser_start_task", "xiaoruo_browser_task_status"]
+
+
+class DeadlineTransport(Transport):
+    """The native task expires using its submitted budget, not the client clock."""
+
+    def write(self, raw, deadline):
+        request = json.loads(raw)
+        tool = request.get("params", {}).get("name")
+        if tool == "xiaoruo_browser_start_task":
+            self.start_remaining_ms = (deadline - time.monotonic()) * 1000
+            self.native_timeout_ms = request["params"]["arguments"]["timeout_ms"]
+            self.native_deadline = time.monotonic() + self.native_timeout_ms / 1000
+            self.states = ["accepted"]
+        elif tool == "xiaoruo_browser_task_status":
+            self.states = ["timed_out" if time.monotonic() >= self.native_deadline else "running"]
+        super().write(raw, deadline)
+
+
+async def test_native_deadline_leaves_time_to_observe_terminal_timeout(discovery):
+    client, opened = fake_client(discovery, transport_class=DeadlineTransport)
+    result = await client.execute("screenshot", {"tab_id": 2}, timeout=1.5)
+    assert result["status"] == "timed_out" and result["error"]["code"] == "task_timeout"
+    assert result["task_id"] == "xr-123-1" and not result["retryable"]
+    transport = opened[0]
+    assert 1000 <= transport.native_timeout_ms < transport.start_remaining_ms - 200
+    assert time.monotonic() < transport.deadline and transport.closed
+    assert sum(item.get("params", {}).get("name") == "xiaoruo_browser_start_task"
+               for item in transport.requests) == 1
+
+
+@pytest.mark.parametrize(("timeout", "requested", "expected"), [
+    (30, None, 29000), (300, None, 120000),
+    (30, 1000, 1000), (30, 120000, 29000), (2, 3000, 1600),
+])
+async def test_native_timeout_budget_reserves_response_time_and_caps_explicit_value(
+        discovery, timeout, requested, expected):
+    client, opened = fake_client(discovery, states=["succeeded"])
+    arguments = {"tab_id": 2}
+    if requested is not None:
+        arguments["timeout_ms"] = requested
+    original = dict(arguments)
+    result = await client.execute("screenshot", arguments, timeout=timeout)
+    assert result["ok"] and arguments == original
+    sent = opened[0].requests[-1]["params"]["arguments"]["timeout_ms"]
+    assert expected - 200 <= sent <= expected
+    if requested == 1000:
+        assert sent == 1000
+
+
+@pytest.mark.parametrize("requested", [None, 1000, 120000])
+async def test_short_outer_deadline_fails_before_dispatch(discovery, requested):
+    client, opened = fake_client(discovery)
+    arguments = {} if requested is None else {"timeout_ms": requested}
+    result = await client.execute("screenshot", arguments, timeout=.2)
+    assert result["status"] == "failed" and result["error"]["code"] == "native_ipc_timeout"
+    assert "task_id" not in result and not result["retryable"]
+    assert len(opened[0].requests) == 3 and opened[0].closed
+
+
+@pytest.mark.parametrize("requested", [True, False, None, "1000", 1000.0, float("nan"),
+                                      float("inf"), 0, -1, 999, 120001, [], {}])
+async def test_invalid_explicit_native_timeout_never_opens_pipe(discovery, requested):
+    client, opened = fake_client(discovery)
+    result = await client.execute("screenshot", {"timeout_ms": requested})
+    assert result["status"] == "failed" and result["error"]["code"] == "invalid_argument"
+    assert not result["retryable"] and not opened
+
+
+@pytest.mark.parametrize("code", ["native_ipc_eof", "native_ipc_timeout", "native_ipc_protocol"])
+async def test_status_error_keeps_accepted_id_and_does_not_replay(discovery, code):
+    class StatusFailure(Transport):
+        def readline(self, deadline):
+            if self.requests[-1].get("params", {}).get("name") == "xiaoruo_browser_task_status":
+                raise ipc.NativeIPCError(code, "Static safe status error")
+            return super().readline(deadline)
+    client, opened = fake_client(discovery, transport_class=StatusFailure, states=["accepted"])
+    result = await client.execute("screenshot", {"tab_id": 2})
+    assert result["status"] == "unknown" and result["task_id"] == "xr-123-1"
+    assert result["error"]["code"] == code and not result["retryable"]
+    assert len(opened) == 1 and opened[0].closed
+    calls = [item["params"]["name"] for item in opened[0].requests if item["method"] == "tools/call"]
+    assert calls == ["xiaoruo_browser_start_task", "xiaoruo_browser_task_status"]
+
+
+async def test_cancelled_execute_during_status_read_releases_single_client_lock(discovery):
+    entered, loop = asyncio.Event(), asyncio.get_running_loop()
+    class PendingStatus(Transport):
+        def readline(self, deadline):
+            if self.requests[-1].get("params", {}).get("name") == "xiaoruo_browser_task_status":
+                loop.call_soon_threadsafe(entered.set)
+                while not self.cancelled:
+                    time.sleep(.005)
+                raise ipc.NativeIPCError("native_ipc_io", "Cancelled local status I/O")
+            return super().readline(deadline)
+    client, opened = fake_client(discovery, transport_class=PendingStatus, states=["accepted"])
+    operation = asyncio.create_task(client.execute("screenshot", {"tab_id": 2}))
+    await asyncio.wait_for(entered.wait(), 1)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(operation, 1)
+    assert len(opened) == 1 and opened[0].cancelled and opened[0].closed
+    assert sum(item.get("params", {}).get("name") == "xiaoruo_browser_start_task"
+               for item in opened[0].requests) == 1
+    assert (await client.tabs())["tabs"] == []
+    assert len(opened) == 2 and opened[1].closed
+
+
+async def test_rejected_task_preserves_valid_native_task_id(discovery):
+    class Rejected(Transport):
+        def tool_result(self, value, images=False):
+            return {**super().tool_result(value, images), "isError": True}
+    client, opened = fake_client(discovery, transport_class=Rejected, states=["failed"])
+    result = await client.execute("screenshot", {"tab_id": 2})
+    assert result["status"] == "failed" and result["task_id"] == "xr-123-1"
+    assert result["error"]["code"] == "native_task_rejected" and not result["retryable"]
+    assert opened[0].closed and len(opened[0].requests) == 4
 
 
 @pytest.mark.parametrize("code", ["native_ipc_eof", "native_ipc_timeout"])
@@ -294,6 +532,38 @@ async def test_request_and_response_limits(discovery, monkeypatch):
         with pytest.raises(ipc.NativeIPCError) as error:
             await session.call_tool("example")
         assert error.value.code == "native_ipc_limit"
+
+
+async def test_large_upload_requires_explicit_adapter_allowance(discovery, monkeypatch):
+    monkeypatch.setattr(ipc, "MAX_REQUEST", 600)
+    monkeypatch.setattr(ipc, "MAX_UPLOAD_REQUEST", 2400)
+    payload = {"tab_id": 2, "selector": "#file", "file_name": "test.txt",
+               "file_data_base64": "YQ==" * 250}
+    client, opened = fake_client(discovery, states=["succeeded"])
+    ordinary = await client.execute("upload_file", payload)
+    assert ordinary["error"]["code"] == "native_ipc_limit"
+    assert ordinary["status"] == "failed" and not ordinary["retryable"]
+    assert len(opened[0].requests) == 3
+    allowed = await client.execute("upload_file", payload, _allow_upload_request=True)
+    assert allowed["ok"] and len(opened[1].requests) == 4
+    assert opened[1].requests[-1]["params"]["arguments"]["action"] == "upload_file"
+    wrong_action = await client.execute("click", payload, _allow_upload_request=True)
+    assert wrong_action["error"]["code"] == "native_ipc_limit"
+    assert len(opened[2].requests) == 3
+
+
+async def test_upload_allowance_remains_bounded_and_generic_calls_stay_small(discovery, monkeypatch):
+    monkeypatch.setattr(ipc, "MAX_REQUEST", 600)
+    monkeypatch.setattr(ipc, "MAX_UPLOAD_REQUEST", 2400)
+    client, opened = fake_client(discovery, states=["succeeded"])
+    result = await client.execute("upload_file", {"file_data_base64": "YQ==" * 1000},
+                                  _allow_upload_request=True)
+    assert result["error"]["code"] == "native_ipc_limit" and result["status"] == "failed"
+    assert len(opened[0].requests) == 3
+    with pytest.raises(ipc.NativeIPCError) as error:
+        await client.call_tool("xiaoruo_browser_start_task",
+                               {"action": "upload_file", "file_data_base64": "YQ==" * 250})
+    assert error.value.code == "native_ipc_limit" and len(opened[1].requests) == 3
 
 
 async def test_in_process_workflows_serialize_with_bounded_busy(discovery):

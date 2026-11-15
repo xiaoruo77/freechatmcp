@@ -13,6 +13,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from web_tools.unified_browser import _recovered_native_screenshot
 
 from .tool_registry import ToolRegistry, _ensure_terminal_user_answer
 from .result_contract import error_result, normalize_result, ToolEnvelope
@@ -41,6 +42,14 @@ def _retain_background_call(call: asyncio.Task[Any]) -> None:
 
 
 MCP_INSTRUCTIONS = (
+    "Remote-computer control keeps UU as the preferred existing channel. The independent "
+    "receiver is standby only: remote_computer may select it only after confirmed UU "
+    "connection unavailability with no GUI input sent. Never disable or replace UU, "
+    "switch transports mid-operation, or replay an uncertain input through the other channel. "
+    "Receiver queued/dispatched/ready states are nonterminal; poll command_status and "
+    "verify actual remote screenshots before reporting GUI work complete. Preparing an "
+    "installer or enrolling a device is not proof of remote control. No local foreground "
+    "or physical keyboard/mouse fallback is allowed for this workflow. "
     "Xiaoruo1 executes explicit file, terminal, Git, browser and deterministic Worker actions. "
     "In chatgpt_direct mode the current ChatGPT conversation owns all planning, diagnosis, "
     "next-tool selection and acceptance decisions. No Sampling, extra model API, or hidden "
@@ -52,6 +61,105 @@ MCP_INSTRUCTIONS = (
     "acceptance evidence. run_autonomous_workflow is a compatibility name: direct mode only "
     "executes explicit workflow.steps; a goal without steps needs ChatGPT planning. "
     "Use exact returned paths and tab IDs, inspect errors, and verify changed retries. "
+    "Python tasks select the project or configured user interpreter; inspect task details "
+    "before diagnosing missing packages. run_python_script accepts .ipynb and executes "
+    "it in a fresh kernel in that interpreter, saving outputs separately from the input. "
+    "Do not claim attachment to an already running VS Code notebook kernel. "
+    "Respect the local desktop_policy.json. With background_preferred, default to "
+    "the same-machine background desktop. When the user explicitly permits foreground "
+    "for the current request, use windows_* with execution_mode=foreground and confirm=true "
+    "on each related call, including status, snapshot and screenshot. The user's natural "
+    "language permission is sufficient; do not ask them to specify tool parameters or "
+    "repeat approval for the same authorized task. This per-call authorization does not "
+    "enable foreground globally or authorize other chats. Honor upstream control/session "
+    "status and user takeover checks. Do not describe foreground as permanently disabled "
+    "when foreground_available_on_request is true. When isolated_only is configured, "
+    "host foreground Windows tools are unavailable; use the same-machine "
+    "background_desktop and vscode_background backend when configured. Never "
+    "fall back to the user's active desktop or "
+    "ask the user to stop typing as a substitute for isolation. File, Python, "
+    "Notebook and explicitly supported native_background browser actions remain "
+    "available. A Windows virtual desktop is not an independent input session. "
+    "background_desktop list_apps discovers installed Win32 app IDs; launch_app "
+    "also accepts an absolute GUI executable and literal argv, so software is "
+    "not limited to preconfigured examples. Observe private windows and UIA "
+    "patterns after launch; do not claim all software or every feature is "
+    "compatible with a hidden non-input desktop. "
+    "ToDesk currently has verified background screenshots only. Its background_input_unverified "
+    "and background_connection_unverified results are real unavailable capabilities. Do not "
+    "bypass them with foreground Windows tools, app activation, local keyboard/mouse, "
+    "terminal scripts or experimental native messages. The current user requires all "
+    "remote-computer work to leave their local foreground work untouched. "
+    "Finish background desktop tasks with background_desktop cleanup; the backend "
+    "also exits after 120 seconds idle. Unsaved work is preserved and reported. "
+    "Hidden-window screenshots and an explicitly labeled private-window desktop "
+    "composition are supported, without switching the user's input desktop. "
+    "Cached hosts may invoke background_desktop or vscode_background with one "
+    "explicit run_workflow step {tool, arguments}; normal confirmation checks "
+    "remain in effect and no foreground desktop fallback is permitted. "
+    "If a cached host omits browser_instances/browser_control/browser_upload_file/"
+    "browser_upload_status/browser_debug_control/video_project_path, call the same "
+    "registered tool via run_workflow with one explicit workflow.steps tool/arguments "
+    "object. This preserves the normal permissions and receipts; it runs no script "
+    "or model. For Xiaoruo v73 file selection use browser_control action upload_file "
+    "after reading the exact file input selector. File selection is not publication. "
+    "To work while the user types, explicitly set browser_control arguments."
+    "execution_mode=native_background for an observed inactive native CEF tab. "
+    "That policy never activates tabs or windows or sends system input. It retains "
+    "account permissions, generation, confirm, receipts and secure-desktop checks. "
+    "Default/foreground operations keep the existing UserTakeover gate. "
+    "For authenticated Edge, isolated_only and background_preferred automatically route browser_control "
+    "and legacy browser write tools to extension_background in extension 1.9.1+. "
+    "This operates existing logged-in HTTP(S) pages through DOM and opens tabs "
+    "inactive, without a Windows input lease. Select an inactive tab; active tabs, "
+    "activation, debugging and legacy capture that switches focus are refused. "
+    "Never ask to enable host desktop input just to use Edge DOM controls. A "
+    "foreground_required result needs inspection, never a hidden focus fallback. "
+    "Edge 1.9.4 read and screenshot requests use extension_dom without Windows input leases. "
+    "Explicit foreground maps to that browser-only path for a capable Edge connection; "
+    "it can read an already active page and does not focus a window. "
+    "Default writes remain inactive background commands. New reads handle HTTP pages and accessible "
+    "frames; inspect frame_id/shadow_path and read_diagnostics. A browser_page_empty error is not "
+    "a successful content read, and it is not evidence that the bridge disconnected. "
+    "browser_page_not_ready is a read-only readiness condition: use the returned exact "
+    "browser/tab, wait briefly and retry the read within a bounded budget. Never infer "
+    "a disconnected bridge, missing desktop permission or authorization to repeat a write. "
+    "Edge 1.9.7 confirms observed-anchor navigation from fresh tab facts, including new "
+    "inactive tabs and cross-origin destinations. After a click use returned next_target "
+    "and read that tab; do not infer that a successful navigation means the whole task "
+    "is complete. Download clicks confirm the exact new browser download record; inspect "
+    "download_verification and verify completion and the local file separately. "
+    "Unrelated user tab/focus changes no longer block the independent inactive target. "
+    "If an old operation lost its result, a fresh successful content read plus explicit "
+    "reconcile decision=continue_from_observed_page and acknowledge_unknown=true can "
+    "resume tracking only from that observed page, without claiming the original write "
+    "succeeded or permitting its replay. Keep the original outcome unknown. "
+    "Edge 1.9.8 cooperative_v2 uses browser DOM operations on the selected existing "
+    "tab even while the user selects or uses it. Do not request a desktop input "
+    "lease or ask the user to stop using Edge. No global keyboard/mouse, clipboard "
+    "or window focusing is used. A changed target URL/control is a real conflict "
+    "requiring a fresh read; ordinary user activity is not a reason to stop. "
+    "For iframe or tabbed forms, a fast read lists structural candidates and "
+    "does not prove they are visible. Use the returned frame_id/shadow_path and "
+    "read mode=visible before editing a candidate in a collapsed panel. "
+    "target_hidden or target_readonly with action_may_have_run=false means "
+    "control validation failed before modification, so inspect the editable "
+    "panel without claiming an Edge permission denial. A missing page-script "
+    "result is an unknown execution outcome and requires a fresh field read. "
+    "browser_verification_required and browser_target_fenced are recoverable receipt "
+    "checkpoints, not an Edge permission denial. Continue recovery within the current "
+    "authorized task. Inspect recovery.blocking_operation_id using browser_control "
+    "action=status with operation_id (task_status is only for a native task_id), "
+    "read the exact target, then use its returned recovery calls and fresh observation "
+    "to reconcile. Fill evidence from the actual read; never replay the original action "
+    "or infer its success. A successful read may include a pending_operation and recovery; "
+    "resolve that checkpoint before planning a new write. If a pending open_tab has no "
+    "known tab, inspect list_tabs and cancel only its local tracking using the fresh "
+    "inventory observation and explicit acknowledgement; never guess or close a created tab. "
+    "Do not stop at a generic connection failure or ask the user to clear receipts. "
+    "If that exact tab has been "
+    "closed, follow recovery.presence_read_call (mode=tab_presence) and decision=target_closed can retire the stale "
+    "uncertain receipt; this does not claim the prior operation succeeded. "
     "Keep the existing deterministic GLYCAM/GROMACS runners and their input/artifact checks; "
     "do not replace requested scientific work with diagnostics. Windows desktop tools are "
     "optional and require an authenticated, unlocked interactive Windows user session. "
@@ -760,7 +868,7 @@ async def browser_press(
 async def browser_instances(timeout: int = 10_000, ctx: Context | None = None) -> dict[str, Any]:
     """Discover connected authenticated browser instances, capabilities, generation and tabs.
 
-    Xiaoruo v72 prefers authenticated local Named Pipe; Edge keeps its extension.
+    Xiaoruo v73 uses authenticated local Named Pipe; Edge keeps its extension.
     Does not launch browsers or copy profile/login data. Select returned ids for
     browser_control; reused or ambiguous tab ids must never be guessed.
     """
@@ -769,7 +877,7 @@ async def browser_instances(timeout: int = 10_000, ctx: Context | None = None) -
 
 @mcp.tool()
 async def browser_control(browser_id: str,
-    action: Literal["status", "list_tabs", "open_tab", "close_tab", "activate_tab", "navigate", "read", "click", "type", "press", "select", "scroll", "wait", "screenshot", "downloads", "task_status", "reconcile"],
+    action: Literal["status", "list_tabs", "open_tab", "close_tab", "activate_tab", "navigate", "read", "click", "type", "press", "select", "scroll", "wait", "screenshot", "downloads", "upload_file", "task_status", "reconcile"],
     tab_id: str | None = None, arguments: dict[str, Any] | None = None,
     operation_id: str | None = None, confirm: bool = False, timeout: int = 30_000,
     ctx: Context | None = None) -> dict[str, Any]:
@@ -778,6 +886,27 @@ async def browser_control(browser_id: str,
     Writes require confirm=true, stable operation_id and arguments.expected_generation
     from discovery. Unknown outcomes require a fresh read and explicit evidence-based
     reconcile, never blind replay. No hidden model or arbitrary JavaScript.
+    Unverified results are recovery checkpoints, not permission denials. Follow
+    recovery calls: action=status with operation_id reads a receipt; task_status
+    requires a native task_id. A fresh read or list_tabs may expose pending_operation
+    and an observation-bound reconciliation template. Inspect the returned page,
+    fill evidence and acknowledge the original unknown result, then continue from
+    current state. Never replay an uncertain write or claim it succeeded.
+    Native v73 upload_file accepts arguments.file_path, the exact selector from
+    read.file_inputs, expected_generation and optional wait_timeout_ms. It selects
+    one allowlisted media file; inspect the page separately for save/publication.
+    arguments.execution_mode=native_background restricts actions to an explicit
+    inactive native CEF tab without system keyboard/mouse input or activation.
+    It supports only guarded DOM actions, native file selection and page capture;
+    foreground_required never triggers an automatic foreground fallback.
+    For Edge 1.9.1+, isolated_only and background_preferred select extension_background:
+    inactive DOM actions and inactive new tabs reuse the logged-in profile,
+    without claiming Windows desktop control. Edge 1.9.4+ reads and explicitly
+    requested foreground use extension_dom: HTTP(S) page/iframe reads can inspect
+    an active page; window focus is refused. Edge 1.9.8 cooperative_v2 also
+    permits explicit DOM writes while the user uses that same tab, with target
+    page identity checks and no global input. Screenshots
+    can capture only an already active target, without activating it.
     """
     return await _invoke_with_heartbeat("browser_control", {"browser_id": browser_id, "action": action,
         "tab_id": tab_id, "arguments": arguments, "operation_id": operation_id, "confirm": confirm,
@@ -923,11 +1052,19 @@ async def git_commit(path: str, message: str, paths: list[str], confirm: bool = 
 
 
 @mcp.tool()
-async def run_python_script(script_path: str | None = None, args: list[str] | None = None, cwd: str = ".", timeout: int | None = None, code: str | None = None, ctx: Context | None = None) -> dict[str, Any]:
-    """Queue the explicitly supplied Python task; poll task_status for real execution results."""
+async def run_python_script(script_path: str | None = None, args: list[str] | None = None, cwd: str = ".", timeout: int | None = None, code: str | None = None, python_executable: str | None = None, ctx: Context | None = None) -> dict[str, Any]:
+    """Run Python code, .py or .ipynb using the project or configured user Python.
+
+    python_executable overrides discovery with an absolute Python path; 'service'
+    explicitly selects the MCP maintenance environment. Notebook inputs are never
+    overwritten: outputs/report are saved under the task output directory, using
+    a fresh kernel in the selected interpreter, not an existing VS Code session.
+    File tasks default cwd to the input directory. Poll task_status for results
+    and the actual interpreter before diagnosing missing packages.
+    """
     result = await _invoke_one_shot_supervisor(
         f"Run the requested Python task to verified completion in {cwd}.",
-        {"action": "python", "args": {"script_path": script_path, "args": args or [], "cwd": cwd, "timeout": timeout, "code": code}},
+        {"action": "python", "args": {"script_path": script_path, "args": args or [], "cwd": cwd, "timeout": timeout, "code": code, "python_executable": python_executable}},
         timeout_seconds=timeout or 3_600,
         ctx=ctx,
     )
@@ -1141,7 +1278,14 @@ async def run_autonomous_workflow(
 
 @mcp.tool()
 async def run_workflow(workflow: dict[str, Any], timeout_seconds: int = 3_600, ctx: Context | None = None) -> dict[str, Any]:
-    """Execute a finite explicitly specified workflow. Direct mode never invokes Sampling or infers steps from a goal."""
+    """Execute explicit tool steps without Sampling or inferred planning.
+
+    Cached hosts missing newer tools can use workflow.steps=[{"tool":
+    "browser_instances", "arguments": {}}], then browser_control in the next
+    call with returned IDs. This calls the same registered tools with all normal
+    permission, takeover and idempotency checks; no Python script is needed.
+    Use one dependent browser operation per call within the 30-second budget.
+    """
     if _direct_mode():
         return await _invoke_tool("run_workflow", {"workflow": workflow, "timeout_seconds": timeout_seconds})
     handoff = await registry()._maybe_handoff_runner_goal(
@@ -1298,59 +1442,162 @@ async def task_log(task_id: str, cursor: int = 0, limit: int = 50) -> dict[str, 
 
 
 @mcp.tool()
-async def windows_snapshot(use_vision: bool = False, use_dom: bool = False) -> dict[str, Any]:
-    """Read the real Windows desktop UI tree and optional private screenshot."""
-    return await _invoke_tool("windows_snapshot", {"use_vision": use_vision, "use_dom": use_dom})
+async def remote_computer(action: str = 'status', arguments: dict[str,Any] | None = None, confirm: bool = False) -> dict[str,Any]:
+    """Control the other real PC without using this PC's foreground input.
+
+    UU is always preferred. Only confirmed UU connection unavailability with
+    no GUI input may fall back to the enrolled receiver; uncertain writes never
+    switch transport or replay. prepare_package(device_name,expected_computer,
+    operation_id) creates a private one-use installer, not a control session.
+    connect(device_name,operation_id) returns session_id and chosen transport.
+    Reserved acceptance_test=True may be passed only after the user explicitly
+    approves a separate receiver acceptance run; never use it for routine work.
+    For receiver queued commands, poll command_status(session_id,command_id).
+    The idle receiver checks once a minute; the first queued connection may
+    wait for its next check. Continue polling instead of requesting manual launch.
+    session_status(session_id) ready is nonterminal. screenshot(session_id,
+    operation_id) returns a command; its verified completion supplies an image.
+    click/type/key/scroll/drag require session_id, operation_id and a fresh image.
+    Mouse uses image x/y pixels; key uses keys, type uses text (<=1000 chars),
+    scroll uses vertical/horizontal, drag uses x/y/to_x/to_y/duration_ms.
+    close(session_id,operation_id) releases only the selected transport's task.
+    All changes need confirm=true. Never use local Windows foreground fallback.
+    """
+    # acceptance_test=True is reserved for a separately, explicitly authorized
+    # receiver acceptance run. Never set it for normal user work or recovery.
+    return await _invoke_tool('remote_computer',{'action':action,'arguments':arguments or {},'confirm':confirm})
 
 
 @mcp.tool()
-async def windows_screenshot() -> dict[str, Any]:
-    """Capture a private image of the interactive Windows desktop."""
-    return await _invoke_tool("windows_screenshot", {})
+async def todesk_control(action: str = 'status', arguments: dict[str, Any] | None = None, confirm: bool = False) -> dict[str, Any]:
+    """Strict background access to an allowlisted native ToDesk viewer.
+
+    Only attaching an existing nonminimized viewer and background screenshots
+    are accepted. Background keyboard/mouse and automatic connection are NOT
+    verified and are rejected before any input. Do not activate, restore or
+    show a window, move the host pointer, or use foreground fallback. The task
+    remains incomplete until actual remote input passes acceptance.
+
+    Verified actions: status/devices/connect(device_name)/screenshot/close.
+    connect only attaches an existing exact viewer; it does not start a new
+    connection or restore minimized windows. Input-shaped compatibility calls
+    click/type/key/scroll/drag return background_input_unverified before dispatch.
+    Closing requires confirm=true and addresses only the exact attached viewer,
+    preserving the logged-in ToDesk and UU receiving services.
+    """
+    return await _invoke_tool('todesk_control', {'action':action,'arguments':arguments or {},'confirm':confirm})
 
 
 @mcp.tool()
-async def windows_control_status() -> dict[str, Any]:
-    """Inspect Windows-MCP control/session status without sending desktop input."""
-    return await _invoke_tool("windows_control_status", {})
+async def background_desktop(action: str = "status", arguments: dict[str, Any] | None = None, confirm: bool = False) -> dict[str, Any]:
+    """Use a same-machine hidden Win32 desktop without touching user input.
+
+    Actions: status, create, list_apps(query,limit), list_windows,
+    launch_app(app=installed app_id/name or executable=absolute GUI .exe,
+    optional argv array/cwd/document_path/timeout), snapshot,
+    screenshot(hwnd for one window; omitted
+    for private-window desktop composition), edge(action,arguments),
+    wps(action,arguments), uu(action,arguments), cleanup. UU supports automatic
+    remote connect(device_name), status/devices/screenshot, click/scroll/
+    drag, keyboard_status/keyboard_start, type(text), key(keys), and exact
+    disconnect/close. Mouse coordinates use the latest physical-pixel capture.
+    A fresh screenshot returns remote_foreground; pass it as expected_target
+    with a stable operation_id for type/key. A temporary graphical agent in the
+    other computer's existing interactive session supplies real screen PNGs,
+    pointer, Unicode/Enter/chords over an authenticated UU terminal. This is not
+    a native UU video viewer. The local logged-in UU GUI/receiver stays running
+    on Default so phone connections remain available; it is never handed off.
+    Input never uses the controller desktop. After mouse/focus/input operations,
+    capture again and verify actual GUI content. A stopped idle helper can be
+    restarted with keyboard_start; unknown writes retain their original receipts.
+    cleanup stops only the exact temporary helper and terminal. It never sends
+    a shared device disconnect or closes the installed UU client or services.
+    WPS Writer supports NativeOM read,
+    replace_text with expected text hash/count, and save_as to a new file.
+    Edge supports list_tabs/open_tab/navigate/read/click/type/screenshot.
+    Finish with cleanup; backend also exits after 120s idle. Supported
+    element patterns click/type/selection/scroll/toggle/expand/collapse/set_range
+    use fresh element_id. Generic apps use a restricted process job; an unknown
+    app already running on the user's desktop is not relaunched. Discovery or
+    launch does not prove full GUI compatibility. No controller-desktop
+    switching, physical pointer movement, global local keys or foreground
+    fallback. UU keyboard injection is confined to the verified other computer.
+    """
+    return await _invoke_tool("background_desktop", {"action": action, "arguments": arguments or {}, "confirm": confirm})
 
 
 @mcp.tool()
-async def windows_click(loc: list[int] | None = None, label: int | None = None, button: str = "left", clicks: int = 1, confirm: bool = False) -> dict[str, Any]:
-    """Click a target observed in Snapshot; requires enabled desktop control and explicit confirmation."""
+async def vscode_background(action: str = "status", arguments: dict[str, Any] | None = None, confirm: bool = False) -> dict[str, Any]:
+    """Read/edit local VS Code documents and Notebook cells without showing editors.
+
+    Actions: status, read_document(path), write_document(path,text,expected_sha256),
+    read_notebook(path), patch_notebook_cells(path,edits), save_document(path).
+    Use returned hashes for edits. Dirty checks cover this dedicated instance,
+    not other VS Code instances. Notebook computation uses run_python_script
+    with a fresh kernel; it does not steal the user's active kernel.
+    """
+    return await _invoke_tool("vscode_background", {"action": action, "arguments": arguments or {}, "confirm": confirm})
+
+
+@mcp.tool()
+async def windows_snapshot(use_vision: bool = False, use_dom: bool = False,
+                           execution_mode: Literal["background", "foreground"] = "background", confirm: bool = False) -> dict[str, Any]:
+    """Read the selected desktop. Explicit user-authorized foreground requires execution_mode=foreground and confirm=true."""
+    return await _invoke_tool("windows_snapshot", {"use_vision": use_vision, "use_dom": use_dom,
+        "execution_mode": execution_mode, "confirm": confirm})
+
+
+@mcp.tool()
+async def windows_screenshot(execution_mode: Literal["background", "foreground"] = "background", confirm: bool = False) -> dict[str, Any]:
+    """Capture the selected desktop. Foreground capture requires explicit user authorization and confirm=true."""
+    return await _invoke_tool("windows_screenshot", {"execution_mode": execution_mode, "confirm": confirm})
+
+
+@mcp.tool()
+async def windows_control_status(execution_mode: Literal["background", "foreground"] = "background", confirm: bool = False) -> dict[str, Any]:
+    """Inspect selected desktop control/session status without input. User-authorized foreground requires execution_mode=foreground and confirm=true."""
+    return await _invoke_tool("windows_control_status", {"execution_mode": execution_mode, "confirm": confirm})
+
+
+@mcp.tool()
+async def windows_click(loc: list[int] | None = None, label: int | None = None, button: str = "left", clicks: int = 1, confirm: bool = False,
+                        execution_mode: Literal["background", "foreground"] = "background") -> dict[str, Any]:
+    """Click an observed target; requires confirm=true. Default background; user-authorized foreground uses execution_mode=foreground."""
     args = {"button": button, "clicks": clicks, **({"loc": loc} if loc is not None else {}), **({"label": label} if label is not None else {})}
-    return await _invoke_tool("windows_click", {"arguments": args, "confirm": confirm})
+    return await _invoke_tool("windows_click", {"arguments": args, "confirm": confirm, "execution_mode": execution_mode})
 
 
 @mcp.tool()
-async def windows_type(text: str, label: int | None = None, loc: list[int] | None = None, clear: bool = False, press_enter: bool = False, confirm: bool = False) -> dict[str, Any]:
-    """Type explicitly authorized text into an observed desktop target, then inspect a new Snapshot."""
+async def windows_type(text: str, label: int | None = None, loc: list[int] | None = None, clear: bool = False, press_enter: bool = False, confirm: bool = False,
+                       execution_mode: Literal["background", "foreground"] = "background") -> dict[str, Any]:
+    """Type authorized text into an observed target with confirm=true, then verify. Default background; explicit foreground permission uses execution_mode=foreground."""
     args = {"text": text, "clear": clear, "press_enter": press_enter, **({"loc": loc} if loc is not None else {}), **({"label": label} if label is not None else {})}
-    return await _invoke_tool("windows_type", {"arguments": args, "confirm": confirm})
+    return await _invoke_tool("windows_type", {"arguments": args, "confirm": confirm, "execution_mode": execution_mode})
 
 
 @mcp.tool()
-async def windows_shortcut(shortcut: str, confirm: bool = False) -> dict[str, Any]:
-    """Send an authorized shortcut (for example ctrl+s) to the interactive desktop."""
-    return await _invoke_tool("windows_shortcut", {"arguments": {"shortcut": shortcut}, "confirm": confirm})
+async def windows_shortcut(shortcut: str, confirm: bool = False, execution_mode: Literal["background", "foreground"] = "background") -> dict[str, Any]:
+    """Send an authorized shortcut with confirm=true. Default background; explicit foreground permission uses execution_mode=foreground."""
+    return await _invoke_tool("windows_shortcut", {"arguments": {"shortcut": shortcut}, "confirm": confirm, "execution_mode": execution_mode})
 
 
 @mcp.tool()
-async def windows_scroll(direction: str, wheel_times: int = 1, type: str = "vertical", loc: list[int] | None = None, confirm: bool = False) -> dict[str, Any]:
-    """Scroll the observed Windows target and verify a subsequent Snapshot."""
-    return await _invoke_tool("windows_scroll", {"arguments": {"direction": direction, "wheel_times": wheel_times, "type": type, **({"loc": loc} if loc is not None else {})}, "confirm": confirm})
+async def windows_scroll(direction: str, wheel_times: int = 1, type: str = "vertical", loc: list[int] | None = None, confirm: bool = False,
+                         execution_mode: Literal["background", "foreground"] = "background") -> dict[str, Any]:
+    """Scroll an observed target with confirm=true and verify. Default background; explicit foreground permission uses execution_mode=foreground."""
+    return await _invoke_tool("windows_scroll", {"arguments": {"direction": direction, "wheel_times": wheel_times, "type": type, **({"loc": loc} if loc is not None else {})}, "confirm": confirm, "execution_mode": execution_mode})
 
 
 @mcp.tool()
-async def windows_app(mode: str, name: str, confirm: bool = False) -> dict[str, Any]:
-    """Launch or switch an explicitly authorized app; arbitrary executable arguments are unavailable."""
-    return await _invoke_tool("windows_app", {"arguments": {"mode": mode, "name": name}, "confirm": confirm})
+async def windows_app(mode: str, name: str, confirm: bool = False, execution_mode: Literal["background", "foreground"] = "background") -> dict[str, Any]:
+    """Launch or switch an authorized app with confirm=true. Default background; explicit foreground permission uses execution_mode=foreground. No arbitrary executable arguments."""
+    return await _invoke_tool("windows_app", {"arguments": {"mode": mode, "name": name}, "confirm": confirm, "execution_mode": execution_mode})
 
 
 _MCP_TOOL_FUNCTIONS = [
     goal_start, goal_status, goal_checkpoint, goal_finish, goal_cancel, task_status, task_log,
     windows_snapshot, windows_screenshot, windows_control_status, windows_click, windows_type,
-    windows_shortcut, windows_scroll, windows_app,
+    windows_shortcut, windows_scroll, windows_app, background_desktop, vscode_background, todesk_control, remote_computer,
     list_directory,
     get_path_info,
     create_directory,
@@ -1428,16 +1675,38 @@ def _direct_public_tool(function):
     async def invoke(*args, **kwargs):
         result = normalize_result(function.__name__, await function(*args, **kwargs))
         content = [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
-        native_browser_image = function.__name__ == "browser_control" and result.get("action") == "screenshot" and result.get("ok") is True
-        if function.__name__ in {"windows_snapshot", "windows_screenshot"} or native_browser_image:
-            private_root = (registry().ctx.settings.data_root / ("browser_screenshots" if native_browser_image else "windows_mcp")).resolve()
+        browser_result = result.get("result", {}).get("data", {})
+        browser_result = browser_result if isinstance(browser_result, dict) else {}
+        evidence = browser_result.get("evidence")
+        capture = browser_result.get("result")
+        recovered_capture = (result.get("action") == "task_status" and result.get("status") == "completed"
+                             and browser_result.get("action") == "task_status" and browser_result.get("ok") is True
+                             and browser_result.get("status") == "completed" and isinstance(evidence, dict)
+                             and evidence.get("verified") is True
+                             and _recovered_native_screenshot(capture))
+        native_browser_image = (function.__name__ == "browser_control" and result.get("ok") is True
+                                and (result.get("action") == "screenshot" or recovered_capture))
+        background_image = function.__name__ in {"background_desktop", "todesk_control", "remote_computer"} or (
+            function.__name__ == "run_workflow" and result.get("remote_tool") == "remote_computer") or (
+            function.__name__ == "windows_screenshot" and result.get("evidence",{}).get("backend")=="local_background")
+        if function.__name__ in {"windows_snapshot", "windows_screenshot"} or native_browser_image or background_image:
+            private_root = (registry().ctx.settings.data_root / ("background_desktop/captures" if background_image else "browser_screenshots" if native_browser_image else "windows_mcp")).resolve()
             for artifact in result.get("artifacts", []):
                 if not isinstance(artifact, dict) or artifact.get("mime_type") not in {"image/png", "image/jpeg", "image/webp"}:
                     continue
+                if recovered_capture and (artifact.get("private") is not True
+                        or any(artifact.get(key) != capture.get(key) for key in ("path", "mime_type", "size_bytes"))):
+                    continue
                 path = Path(artifact.get("path", "")).resolve()
                 if path.is_relative_to(private_root) and path.is_file() and path.stat().st_size <= 12 * 1024 * 1024:
+                    if recovered_capture and path.stat().st_size != capture["size_bytes"]:
+                        continue
                     content.append(ImageContent(type="image", data=base64.b64encode(path.read_bytes()).decode("ascii"), mimeType=artifact["mime_type"]))
-        return CallToolResult(content=content, structuredContent=result, isError=result["ok"] is False)
+        browser_checkpoint = (function.__name__.startswith("browser_") and
+            (result.get("status") in {"outcome_unknown", "dispatched_unverified"}
+             or result.get("error_code") == "browser_target_fenced"))
+        return CallToolResult(content=content, structuredContent=result,
+            isError=result["ok"] is False and not browser_checkpoint)
     # A direct tool always advertises the envelope, including formerly list-valued tools.
     invoke.__signature__ = inspect.signature(function, eval_str=True).replace(return_annotation=ToolEnvelope)
     invoke.__annotations__ = {**function.__annotations__, "return": ToolEnvelope}

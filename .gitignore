@@ -23,7 +23,11 @@ __pycache__/
 *.zip
 08_web_data/*
 !08_web_data/schema.sql
-09_web_logs/
+/09_web_logs/*
+!/09_web_logs/web_logs/
+/09_web_logs/web_logs/*
+!/09_web_logs/web_logs/__init__.py
+!/09_web_logs/web_logs/logger.py
 07_web_config/orchestration.json
 07_web_config/windows_mcp.json
 10_web_deploy/cloudflared/
@@ -37,3 +41,10 @@ md_auto_stage/
 Thumbs.db
 
 10_web_deploy/staging/
+/workspace/
+/07_web_config/background_desktop.json
+/07_web_config/desktop_policy.json
+/07_web_config/vscode_background.json
+/07_web_config/remote_receiver.json
+/07_web_config/todesk_control.json
+*.token

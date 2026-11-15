@@ -21,6 +21,8 @@ from typing import Any
 from urllib.parse import urlsplit
 import uuid
 
+from .desktop_policy import DesktopPolicyError, FOREGROUND_REQUEST_MESSAGE, ISOLATION_MESSAGE, isolated_control_status, load_desktop_policy
+
 
 READ_ACTIONS = frozenset({"Snapshot", "Screenshot", "ControlStatus"})
 CONTROL_ACTIONS = frozenset({"Click", "Type", "Shortcut", "Scroll", "App"})
@@ -335,13 +337,66 @@ class WindowsMCPBridge:
             "evidence": {"tool": action, "transport": self._option("transport", "stdio"), "checks": [], "upstream_reported_success": not failed, "action_may_have_run": action in CONTROL_ACTIONS, "verification_required": action in CONTROL_ACTIONS},
         }
 
-    async def call(self, action: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def call(self, action: str, arguments: dict[str, Any] | None = None, *,
+                   execution_mode: str = "background", foreground_authorized: bool = False) -> dict[str, Any]:
         if action not in ALLOWED_ACTIONS:
             return self._error(action, WindowsMCPError("desktop_action_denied", "Desktop action is outside the explicit allowlist"))
+        if not isinstance(execution_mode, str) or execution_mode not in {"background", "foreground"}:
+            return self._error(action, WindowsMCPError("invalid_arguments", "Desktop execution_mode must be background or foreground"))
+        # Check before transport configuration, token reads, bridge startup or
+        # input preflight. A missing isolated backend must never select this desktop.
+        try:
+            policy = load_desktop_policy(self.settings)
+        except DesktopPolicyError as exc:
+            denied = self._error(action, WindowsMCPError("desktop_policy_invalid", str(exc)))
+            denied["evidence"]["action_may_have_run"] = False
+            return denied
+
+        explicit_foreground = execution_mode == "foreground"
+        authorized = explicit_foreground and foreground_authorized is True
+        effective_mode = "foreground" if explicit_foreground or policy["mode"] == "interactive" else "background"
+        authorization_source = "background_default"
+        if policy["mode"] == "interactive":
+            authorization_source = "interactive_policy"
+        if authorized:
+            authorization_source = "user_request"
+
+        def routed(value):
+            value["desktop_policy"] = policy
+            value["evidence"] = {**value.get("evidence", {}),
+                "requested_execution_mode": execution_mode,
+                "effective_execution_mode": effective_mode,
+                "foreground_authorized": authorized,
+                "authorization_source": authorization_source}
+            return value
+
+        if explicit_foreground and policy["mode"] == "isolated_only":
+            effective_mode = "background"
+            denied = self._error(action, WindowsMCPError("foreground_policy_denied", "当前本机策略为 isolated_only，需先改为允许按请求使用前台的策略"))
+            denied["evidence"]["action_may_have_run"] = False
+            return routed(denied)
+        if explicit_foreground and not authorized:
+            denied = self._error(action, WindowsMCPError("foreground_authorization_required", FOREGROUND_REQUEST_MESSAGE))
+            denied["evidence"]["action_may_have_run"] = False
+            return routed(denied)
+        if effective_mode == "background":
+            from .background_desktop_client import configured, windows_action
+            if configured(self.settings):
+                return routed(await windows_action(self.settings, action, arguments))
+            if action == "ControlStatus":
+                try:
+                    _validate_args(action, arguments if arguments is not None else {})
+                except WindowsMCPError as exc:
+                    return routed(self._error(action, exc))
+                return routed(isolated_control_status(policy))
+            message = FOREGROUND_REQUEST_MESSAGE if policy["mode"] == "background_preferred" else ISOLATION_MESSAGE
+            denied = self._error(action, WindowsMCPError("isolated_desktop_unavailable", message))
+            denied["evidence"]["action_may_have_run"] = False
+            return routed(denied)
         if not self._option("enabled", False):
-            return self._error(action, WindowsMCPError("desktop_disabled", "Windows-MCP is disabled; enable only after reviewing user-session deployment"))
+            return routed(self._error(action, WindowsMCPError("desktop_disabled", "Windows-MCP is disabled; enable only after reviewing user-session deployment")))
         if action in CONTROL_ACTIONS and not self._option("control_enabled", False):
-            return self._error(action, WindowsMCPError("desktop_control_disabled", "Windows desktop control requires explicit local enablement"))
+            return routed(self._error(action, WindowsMCPError("desktop_control_disabled", "Windows desktop control requires explicit local enablement")))
         try:
             _validate_args(action, arguments if arguments is not None else {})
             # Check again for each operation: a persistent child can outlive a
@@ -360,12 +415,13 @@ class WindowsMCPBridge:
                 await self._queue.put((action, arguments or {}, future))
                 timeout = max(1.0, min(float(self._option("timeout", 30)), 120.0))
                 try:
-                    return await asyncio.wait_for(future, timeout=timeout)
+                    observed = await asyncio.wait_for(future, timeout=timeout)
+                    return routed(observed)
                 except TimeoutError:
                     await self.close()
-                    return self._error(action, WindowsMCPError("desktop_timeout", "Desktop call timed out; inspect current state before retrying a control action", retryable=action in READ_ACTIONS))
+                    return routed(self._error(action, WindowsMCPError("desktop_timeout", "Desktop call timed out; inspect current state before retrying a control action", retryable=action in READ_ACTIONS)))
         except WindowsMCPError as exc:
-            return self._error(action, exc)
+            return routed(self._error(action, exc))
 
     @staticmethod
     def _error(action: str, exc: WindowsMCPError) -> dict[str, Any]:

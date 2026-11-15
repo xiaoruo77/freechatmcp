@@ -39,7 +39,7 @@ def test_upload_surface_auth_schema_and_realistic_selection_contract(isolated_se
         assert tools['browser_upload_status']['annotations']['readOnlyHint']
         assert not tools['video_project_path']['annotations']['readOnlyHint']
         args = {'tab_id': '17', 'selector': 'input[type="file"][data-xiaoruo1-upload-id="observed-id"]',
-                'file_path': r'C:\safe-fixture\video.mp4',
+                'file_path': r'D:\workspace-fixtures\media-fixtures\sample-media\2026_10\27\example.mp4',
                 'idempotency_key': 'mcp-surface-test'}
         refused = rpc(client, 'tools/call', {'name': 'browser_upload_file', 'arguments': args})
         assert refused['isError'] and not calls
@@ -50,7 +50,7 @@ def test_upload_surface_auth_schema_and_realistic_selection_contract(isolated_se
         assert selected['stages']['platform_processed'] is None
         assert calls == [{**args, 'timeout': 30000}]
         project = rpc(client, 'tools/call', {'name': 'video_project_path', 'arguments': {'date': '2026-10-27'}})['structuredContent']
-        assert project['ok'] and project['result']['data']['path'].endswith(r'2026_10\27')
+        assert project['ok'] and project['result']['data']['path'].replace(chr(92), '/').endswith('2026_10/27')
 
 
 def test_upload_admin_boundary(isolated_settings, monkeypatch):

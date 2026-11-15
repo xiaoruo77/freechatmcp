@@ -111,7 +111,7 @@ def test_direct_mcp_browser_runner_no_handoff_and_permissions(isolated_settings,
         assert planning["status"] == "needs_chatgpt_planning" and not planning["terminal"]
         assert host.call("read_file", {"path": str(tmp_path.parent / "outside.txt")})["error_code"] == "permission_denied"
         assert host.call("windows_type", {"text": "test", "confirm": True})["error_code"] == "permission_denied"
-        assert host.call("windows_snapshot")["error_code"] == "desktop_disabled"
+        assert host.call("windows_snapshot")["error_code"] == "isolated_desktop_unavailable"
         assert host.call("list_tasks")["result"]["data"]["items"]
 
 

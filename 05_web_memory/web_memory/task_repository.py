@@ -64,23 +64,30 @@ class TaskRepository:
                 await self.db.commit()
                 return None
             now = utc_now()
-            await self.db.execute("UPDATE tasks SET status='running',started_at=? WHERE id=? AND status='queued'", (now, row["id"]))
+            cursor = await self.db.execute("UPDATE tasks SET status='running',started_at=? WHERE id=? AND status='queued'", (now, row["id"]))
             await self.db.commit()
+            if cursor.rowcount != 1:
+                # A cancellation on a shared connection may run after the
+                # selection. Never execute a task whose claim did not succeed.
+                return None
             row["status"] = "running"
             row["started_at"] = now
             return self._decode(row)
-        except Exception:
+        except BaseException:
             await self.db.rollback()
             raise
 
     async def request_cancel(self, task_id: str) -> dict[str, Any] | None:
-        row = await self.db.fetchone("SELECT status FROM tasks WHERE id=?", (task_id,))
-        if not row:
-            return None
-        if row["status"] == "queued":
-            await self.db.execute("UPDATE tasks SET status='cancelled',finished_at=?,cancel_requested=1 WHERE id=?", (utc_now(), task_id))
-        elif row["status"] == "running":
-            await self.db.execute("UPDATE tasks SET cancel_requested=1 WHERE id=?", (task_id,))
+        # One atomic state-sensitive update: a queued task can be claimed
+        # between a prior SELECT and UPDATE. Running tasks must receive the
+        # cooperative signal so their owned processes are stopped first.
+        await self.db.execute(
+            "UPDATE tasks SET cancel_requested=1,"
+            "finished_at=CASE WHEN status='queued' THEN ? ELSE finished_at END,"
+            "status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END "
+            "WHERE id=? AND status IN ('queued','running')",
+            (utc_now(), task_id),
+        )
         await self.db.commit()
         return await self.get(task_id)
 

@@ -9,6 +9,7 @@ from web_logs.logger import audit
 from web_memory.task_repository import TaskRepository
 from web_memory.store import Database
 from web_tools.runner import ProfileRunner
+from .lease import WorkerLease
 
 
 class WorkerService:
@@ -24,6 +25,12 @@ class WorkerService:
         self.current_task_id: str | None = None
 
     async def run_forever(self) -> None:
+        # Acquire before orphan recovery. A second worker must never reclassify
+        # a task that the first worker is still executing.
+        with WorkerLease(self.db.path):
+            await self._run_forever_owned()
+
+    async def _run_forever_owned(self) -> None:
         await self.db.init()
         orphaned = await self.tasks.mark_orphaned()
         if orphaned:
@@ -41,6 +48,7 @@ class WorkerService:
             try:
                 await self._run_task(task)
             except asyncio.CancelledError:
+                await self.tasks.finish(task["id"], "cancelled", error="Worker stopped while task was running")
                 raise
             except Exception as exc:  # pragma: no cover - defensive daemon boundary
                 await self.tasks.add_log(task["id"], "ERROR", f"Worker exception: {type(exc).__name__}: {exc}")
@@ -55,7 +63,7 @@ class WorkerService:
         profile = task["profile"]
 
         async def is_cancelled() -> bool:
-            return await self.tasks.is_cancel_requested(task_id)
+            return self.stop_event.is_set() or await self.tasks.is_cancel_requested(task_id)
 
         async def on_output(level: str, message: str) -> None:
             await self.tasks.add_log(task_id, level, message)

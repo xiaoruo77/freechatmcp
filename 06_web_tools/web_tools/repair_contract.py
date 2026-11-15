@@ -1,6 +1,6 @@
 """Shared, bounded repair contract for compatibility workflows.
 
-The original Xiaoruo2 workflow surface exposed a nested ``repair`` object.
+The original legacy workflow surface exposed a nested ``repair`` object.
 Xiaoruo1 already has richer recovery fields, so this module adds the small
 machine-readable contract without replacing the existing task/retry policy.
 """

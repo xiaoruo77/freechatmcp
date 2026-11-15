@@ -228,6 +228,12 @@ def discover_environment(
     executable_names = ("python", "powershell", "pwsh", "node", "npm", "git", "wsl.exe", "cloudflared")
     executables = {name: shutil.which(name) for name in executable_names if shutil.which(name)}
     bridge_url = str(getattr(settings, "browser_bridge_url", ""))
+    from .python_runtime import resolve_python_runtime
+
+    try:
+        python_task_runtime = resolve_python_runtime({}, settings, Path(cwd or settings.workspace_root))
+    except (OSError, ValueError) as exc:
+        python_task_runtime = {"error": str(exc), "selection_required": True}
     return {
         "success": True,
         "terminal": True,
@@ -238,6 +244,7 @@ def discover_environment(
         "identity": {"platform": platform.platform(), "python": sys.executable, "user": os.environ.get("USERNAME", "")},
         "runtime": {"project_root": str(settings.project_root), "workspace_root": str(settings.workspace_root), "mcp_port": settings.port, "browser_bridge": bridge_url},
         "executables": executables,
+        "python_task_runtime": python_task_runtime,
         "instruction_candidates": [str(item) for item in docs],
         "script_candidates": [str(item) for item in scripts],
         # Read more than the old four-script slice.  The first shallow files

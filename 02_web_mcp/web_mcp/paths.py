@@ -35,3 +35,4 @@ def relative_display(path: Path, roots: list[Path]) -> str:
         except ValueError:
             continue
     return str(path)
+

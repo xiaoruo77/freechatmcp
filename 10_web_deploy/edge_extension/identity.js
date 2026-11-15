@@ -16,7 +16,13 @@ function browserIdentity() {
     }
     const kind = BROWSER_FAMILY === "edge" ? "edge" : globalThis.XIAORUO1_BROWSER_KIND === "xiaoruo_browser" ? "xiaoruo_browser" : "chromium_other";
     return {instance_id:id,browser_kind:kind,browser_family:BROWSER_FAMILY,browser_version:BROWSER_VERSION,
-      version:EXTENSION_VERSION,supported_actions:[...UNIFIED_ACTIONS]};
+      version:EXTENSION_VERSION,supported_actions:[...UNIFIED_ACTIONS],
+      ...(kind === "edge" ? {background_protocol:"xiaoruo1-edge-dom-background/1",
+        background_policy:"target_inactive_v2",
+        dom_protocol:"xiaoruo1-edge-dom/1",
+        dom_policy:"cooperative_v2",
+        dom_actions:["open_tab","close_tab","activate_tab","navigate","read","click","type","press","select","scroll","wait","screenshot"],
+        background_actions:["status","list_tabs","open_tab","close_tab","navigate","read","click","type","press","select","scroll","wait","downloads"]} : {})};
   })();
   return browserIdentityPromise;
 }

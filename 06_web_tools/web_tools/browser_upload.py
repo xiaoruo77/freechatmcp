@@ -17,7 +17,7 @@ import sqlite3
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
-MEDIA_ROOT = Path(os.getenv("WEB_AGENT_MEDIA_ROOT", str(Path.home() / "Videos" / "FreeChatMCP")))
+MEDIA_ROOT = Path(os.environ.get("WEB_AGENT_MEDIA_ROOT") or Path.home() / "Videos" / "FreeChatMCP")
 MAX_BYTES = 32 * 1024 * 1024
 # Synchronous SQLite calls are deliberately short: a second dialog/process
 # holding a transaction must not stall the bridge event loop for seconds.
@@ -43,8 +43,6 @@ def allowed_url(value: str) -> bool:
         u = urlsplit(value)
         if u.username or u.password:
             return False
-        if u.scheme == "https" and u.hostname == "mcp.example.com" and u.port in (None,443):
-            return u.path == "/upload-test/fixture.html" and not u.query and not u.fragment
         if u.scheme == "https" and u.hostname == "member.bilibili.com" and u.port in (None, 443):
             return u.path.startswith("/platform/upload/")
         return (u.scheme == "http" and u.hostname == "127.0.0.1" and u.port == 48272

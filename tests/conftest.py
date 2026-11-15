@@ -38,8 +38,17 @@ def isolated_settings(tmp_path, monkeypatch):
         log_root=logs,
         task_output_root=outputs,
         generated_script_root=scripts,
+        extra={**base.extra, "python_runtime_config": str(tmp_path / "python_runtime.json"),
+               "desktop_policy_config": str(tmp_path / "desktop_policy.json"),
+               "background_desktop_config": str(tmp_path / "background_desktop.json"),
+               "terminal_runtime_config": str(tmp_path / "terminal_runtime.json"),
+               "remote_receiver_config": str(tmp_path / "remote_receiver.json")},
         embedded_worker=False,
+        admin_mode=True,  # Only this disposable fixture; default tested separately.
+        allow_custom_shell_workflow=True,
+        allow_custom_wsl_workflow=True,
         # The deployed mode file must not change the legacy regression suite.
         # Direct-mode tests explicitly opt in with dataclasses.replace().
         orchestration_mode="legacy_sampling",
     )
+

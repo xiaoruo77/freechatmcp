@@ -19,6 +19,9 @@ def unlocked_test_desktop(monkeypatch):
 
 def settings(tmp_path, **overrides):
     values = dict(data_root=tmp_path, windows_mcp_enabled=True, windows_mcp_control_enabled=True, windows_mcp_timeout=1, windows_mcp_transport="stdio")
+    policy = tmp_path / "test-desktop-policy.json"
+    policy.write_text('{"mode":"interactive"}', encoding="utf8")
+    values["extra"] = {"desktop_policy_config": str(policy)}
     values.update(overrides)
     return SimpleNamespace(**values)
 
@@ -55,7 +58,7 @@ def fake_bridge(tmp_path, monkeypatch, **overrides):
 @pytest.mark.asyncio
 async def test_default_disabled_and_control_requires_separate_gate(tmp_path):
     bridge = WindowsMCPBridge(SimpleNamespace(data_root=tmp_path))
-    assert (await bridge.call("Snapshot"))["error_code"] == "desktop_disabled"
+    assert (await bridge.call("Snapshot"))["error_code"] == "isolated_desktop_unavailable"
     bridge = WindowsMCPBridge(settings(tmp_path, windows_mcp_control_enabled=False))
     assert (await bridge.call("Click", {"loc": [1, 2]}))["error_code"] == "desktop_control_disabled"
     assert bridge._worker is None

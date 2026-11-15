@@ -246,9 +246,7 @@ def staged_bridge(tmp_path, monkeypatch):
     import importlib.util
     import sys
     root = Path(__file__).resolve().parents[1]
-    path = root / "10_web_deploy/staging/browser-unification-20261027/06_web_tools/web_tools/browser_bridge.py"
-    if not path.is_file():
-        pytest.skip("Historical deployment staging snapshot is not included in public source")
+    path = root / "06_web_tools/web_tools/browser_bridge.py"
     monkeypatch.setenv("WEB_AGENT_DATA", str(tmp_path / "data"))
     monkeypatch.setenv("WEB_AGENT_BROWSER_TOKEN_FILE", str(tmp_path / "browser.token"))
     spec = importlib.util.spec_from_file_location("web_tools._staged_unified_browser_bridge", path)

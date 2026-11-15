@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from uuid import uuid4
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
 from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend
 from mcp.server.auth.provider import ProviderTokenVerifier, RegistrationError
@@ -30,6 +31,11 @@ from web_logs.logger import audit, configure_logging
 from web_memory.repository import ConversationRepository
 from web_memory.store import Database
 from web_worker.service import WorkerService
+from web_tools.remote_gui_capture import create_capture_router
+from web_tools.remote_receiver_server import (
+    RemoteReceiverManager, create_receiver_router, receiver_route_uses_own_auth,
+)
+from web_tools.remote_receiver_control import RemoteReceiverController
 
 from .auth import extract_token, require_request_token, valid_token
 from .mcp_server import build_mcp, configure_registry, release_registry
@@ -137,18 +143,112 @@ def _mcp_transport_security(settings: Settings) -> TransportSecuritySettings:
     )
 
 
+def _capture_route_uses_own_auth(scope: dict[str, Any]) -> bool:
+    """Only the capture router's actual HTTP operations bypass OAuth parsing."""
+    if scope.get("type") != "http":
+        return False
+    method, path = scope.get("method"), scope.get("path", "")
+    if method == "POST" and path == "/internal/remote-gui/captures":
+        return True
+    if method in {"GET", "DELETE"} and re.fullmatch(r"/internal/remote-gui/captures/[0-9a-f]{32}", path):
+        return True
+    return bool(method == "POST" and re.fullmatch(r"/remote-gui/captures/[0-9a-f]{32}", path))
+
+
+class _CaptureAwareBearerAuthBackend(BearerAuthBackend):
+    def __init__(self, token_verifier, *, capture_enabled: bool, receiver_enabled: bool = False):
+        super().__init__(token_verifier)
+        self.capture_enabled = capture_enabled
+        self.receiver_enabled = receiver_enabled
+
+    async def authenticate(self, conn):
+        if self.capture_enabled and _capture_route_uses_own_auth(conn.scope):
+            # These routes validate loopback+bridge or a single-use upload
+            # ticket themselves. Never treat those credentials as MCP tokens.
+            return None
+        if self.receiver_enabled and receiver_route_uses_own_auth(conn.scope):
+            # Enrollment and device credentials are checked by the receiver
+            # router, never interpreted as OAuth/MCP access tokens.
+            return None
+        return await super().authenticate(conn)
+
+
+def _configured_capture_router(settings: Settings):
+    config_reference = (settings.extra.get("background_desktop_config")
+                        or settings.project_root / "07_web_config" / "background_desktop.json")
+    config_path = Path(config_reference)
+    if not config_path.is_file():
+        return None
+    if config_path.stat().st_size > 16_384:
+        raise ValueError("Background desktop configuration is too large")
+    config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(config, dict):
+        raise ValueError("Background desktop configuration must be an object")
+    public_origin = config.get("capture_public_origin")
+    token_reference = config.get("token_file")
+    if not public_origin or not token_reference:
+        return None
+    if not isinstance(public_origin, str) or not isinstance(token_reference, str):
+        raise ValueError("Remote GUI capture configuration is invalid")
+    token_path = Path(token_reference)
+    if not token_path.is_absolute():
+        raise ValueError("Background desktop credential reference is invalid")
+    if not token_path.is_file():
+        return None
+    if token_path.stat().st_size > 4096:
+        raise ValueError("Background desktop credential reference is invalid")
+    token = token_path.read_text(encoding="utf-8").strip()
+    if len(token) < 32 or any(char in token for char in "\n\r\0"):
+        raise ValueError("Background desktop credential is invalid")
+    return create_capture_router(settings.data_root, token, public_origin)
+
+
+def _configured_receiver_manager(settings: Settings, capture_manager) -> RemoteReceiverManager | None:
+    config_reference = (settings.extra.get("remote_receiver_config")
+                        or settings.project_root / "07_web_config" / "remote_receiver.json")
+    config_path = Path(config_reference)
+    if not config_path.is_file():
+        return None
+    if config_path.stat().st_size > 16_384:
+        raise ValueError("Remote receiver configuration is too large")
+    try:
+        with config_path.open("rb") as config_file:
+            payload = config_file.read(16_385)
+        if len(payload) > 16_384:
+            raise ValueError("Remote receiver configuration is too large")
+        config = json.loads(payload.decode("utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
+        raise ValueError("Remote receiver configuration is invalid") from None
+    if not isinstance(config, dict):
+        raise ValueError("Remote receiver configuration must be an object")
+    if config.get("enabled") is not True:
+        return None
+    # The manager validates one exact HTTPS origin without credentials, query,
+    # fragment, or a URL path. Capture availability does not gate enrollment.
+    return RemoteReceiverManager(settings.data_root, config.get("public_origin"), capture_manager,
+                                 recover_on_startup=False)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     runtime_settings = settings or Settings.load()
     oauth_provider: LocalOAuthProvider | None = None
     oauth_settings: AuthSettings | None = None
+    capture_router = _configured_capture_router(runtime_settings)
+    capture_manager = capture_router.capture_manager if capture_router is not None else None
+    receiver_manager = _configured_receiver_manager(runtime_settings, capture_manager)
+    receiver_controller = (RemoteReceiverController(receiver_manager, capture_manager, runtime_settings.data_root)
+                           if receiver_manager is not None else None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         state: AppState = app.state.web_agent
+        if receiver_manager is not None:
+            receiver_manager.initialize_runtime()
         await state.db.init()
         state.canvas = CanvasService(state.db)
         state.conversations = ConversationRepository(state.db)
         state.registry = ToolRegistry(ToolContext(runtime_settings, state.db, state.canvas, state.logger))
+        state.registry.direct_tools.remote_receiver_controller = receiver_controller
         previous_registry = configure_registry(state.registry)
         if runtime_settings.embedded_worker:
             state.worker = WorkerService(runtime_settings, state.db, state.logger)
@@ -159,6 +259,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async with mcp_instance.session_manager.run():
                 yield
         finally:
+            if receiver_manager is not None:
+                receiver_manager.close()
+            if capture_manager is not None:
+                capture_manager.close()
             if state.worker_task:
                 state.worker.stop() if state.worker else None
                 state.worker_task.cancel()
@@ -172,6 +276,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title=runtime_settings.display_name, version="0.2.0", lifespan=lifespan)
     app.state.web_agent = AppState(runtime_settings)
+    app.state.remote_gui_capture_manager = capture_manager
+    app.state.remote_receiver_manager = receiver_manager
+    app.state.remote_receiver_controller = receiver_controller
+    if capture_router is not None:
+        app.include_router(capture_router)
+    if receiver_manager is not None:
+        app.include_router(create_receiver_router(receiver_manager))
     if runtime_settings.oauth_enabled:
         oauth_provider = LocalOAuthProvider(runtime_settings, app.state.web_agent.db)
         oauth_settings = AuthSettings(
@@ -192,7 +303,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.add_middleware(AuthContextMiddleware)
         app.add_middleware(
             AuthenticationMiddleware,
-            backend=BearerAuthBackend(ProviderTokenVerifier(oauth_provider)),
+            backend=_CaptureAwareBearerAuthBackend(ProviderTokenVerifier(oauth_provider),
+                                                   capture_enabled=capture_router is not None,
+                                                   receiver_enabled=receiver_manager is not None),
         )
     mcp_instance = build_mcp(
         _mcp_transport_security(runtime_settings),
@@ -402,7 +515,7 @@ button{{padding:12px 18px;border:0;border-radius:8px;background:#111;color:white
     async def fixed_upload_fixture():
         # Fixed non-sensitive test HTML only. Never expose a filesystem route,
         # selected local file, browser state or credentials through this URL.
-        fixture = runtime_settings.project_root / "10_web_deploy" / "validation_runs" / "bilibili-web-upload-20261027" / "fixture.html"
+        fixture = runtime_settings.project_root / "10_web_deploy" / "edge_extension" / "browser-test-fixture.html"
         if not fixture.is_file():
             raise HTTPException(status_code=404, detail="Upload fixture is not installed")
         return FileResponse(fixture, media_type="text/html", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
@@ -410,6 +523,32 @@ button{{padding:12px 18px;border:0;border-radius:8px;background:#111;color:white
     @app.get("/upload-test/{unavailable:path}", include_in_schema=False)
     async def reject_fixture_paths(unavailable: str):
         raise HTTPException(status_code=404, detail="Only the fixed test fixture is available")
+
+    @app.get("/browser-test/redirect", include_in_schema=False)
+    async def fixed_browser_redirect():
+        # One constant, non-sensitive redirect. Query parameters are ignored;
+        # this route can never redirect to a caller URL or expose local state.
+        return RedirectResponse("/upload-test/fixture.html?reliability=redirected", status_code=302,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    @app.get("/browser-test/slow-image.svg", include_in_schema=False)
+    async def fixed_browser_slow_image():
+        # Let a disposable page expose its DOM before its load event finishes.
+        # This delays only one fixed static resource, never a file or user URL.
+        await asyncio.sleep(3.5)
+        return Response('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="white"/></svg>',
+            media_type="image/svg+xml", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                "Content-Security-Policy": "default-src 'none'; sandbox"})
+
+    @app.get("/browser-test/download.txt", include_in_schema=False)
+    async def fixed_browser_download():
+        return Response("XIAORUO1_DISPOSABLE_BROWSER_DOWNLOAD_CHECK\n", media_type="text/plain",
+            headers={"Content-Disposition": 'attachment; filename="xiaoruo1-browser-validation.txt"',
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+    @app.get("/browser-test/{unavailable:path}", include_in_schema=False)
+    async def reject_browser_test_paths(unavailable: str):
+        raise HTTPException(status_code=404, detail="Only the fixed browser test resources are available")
 
     @app.get("/health")
     async def health() -> dict[str, Any]:

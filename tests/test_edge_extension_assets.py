@@ -18,7 +18,7 @@ def test_edge_extension_read_path_is_bounded_and_versioned():
     # fail the suite and masked the actual bounded-read assertions below.
     assert re.fullmatch(r"\d+\.\d+\.\d+", str(manifest["version"]))
     assert "downloads" in manifest["permissions"]
-    assert manifest["content_scripts"][0]["js"] == ["reader.js"]
+    assert manifest["content_scripts"][0]["js"] == ["reader.js", "edge-reader.js"]
     assert "READ_LOAD_GRACE_MS = 2500" in source
     assert "READ_CONTENT_TIMEOUT_MS = 6000" in source
     assert "READ_SCRIPT_TIMEOUT_MS = 8000" in source

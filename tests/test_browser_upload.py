@@ -98,7 +98,7 @@ def test_exact_upload_destinations(url):
 
 @pytest.mark.parametrize("url", ["https://evil.test/platform/upload/video/frame", "http://member.bilibili.com/platform/upload/video/frame",
     "https://member.bilibili.com.evil.test/platform/upload/video/frame", "https://member.bilibili.com/platform/home",
-    "https://user:pass@localhost/platform/upload/video/frame", "http://127.0.0.1:48273/upload-test/fixture.html",
+    "https://name:pass@member.bilibili.com/platform/upload/video/frame", "http://127.0.0.1:48273/upload-test/fixture.html",
     "http://127.0.0.1:48272/private/token", "http://localhost:48272/upload-test/fixture.html",
     "http://127.0.0.1:48272/upload-test/fixture.html?secret=1"])
 def test_other_upload_destinations_denied(url):
@@ -375,6 +375,9 @@ def test_reparse_is_rejected_even_when_target_would_be_allowed(media, monkeypatc
 def test_multiple_extension_sockets_route_explicit_edge_tab_without_evicting_it(monkeypatch):
     from fastapi.testclient import TestClient
     from web_tools import browser_bridge
+    # This is a socket-routing compatibility test, not a production desktop
+    # policy test. Never inherit the workstation's isolated_only configuration.
+    monkeypatch.setattr(browser_bridge, "_isolated_browser_policy", lambda: False)
     isolated = browser_bridge.EdgeExtensionBridge()
     monkeypatch.setattr(browser_bridge, "bridge", isolated)
     token = browser_bridge.BRIDGE_TOKEN

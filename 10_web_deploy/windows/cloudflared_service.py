@@ -4,6 +4,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import win32serviceutil
@@ -11,7 +12,7 @@ import win32serviceutil
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from service_common import ManagedProcessService, ROOT
-from tunnel_health import TunnelObservation, TunnelReadinessPolicy, observe_metrics
+from tunnel_health import TunnelObservation, TunnelReadinessPolicy, observe_readiness
 
 
 cloudflared = shutil.which("cloudflared") or r"C:\Program Files (x86)\cloudflared\cloudflared.exe"
@@ -28,7 +29,7 @@ class CloudflaredService(ManagedProcessService):
     _readiness_grace_seconds = 180.0
     _readiness_restart_cooldown_seconds = 900.0
     _health_log_path = ROOT / "09_web_logs" / "cloudflared_watchdog.log"
-    _metrics_url = "http://127.0.0.1:20241/metrics"
+    _ready_url = "http://127.0.0.1:20241/ready"
     _health_opener = build_opener(ProxyHandler({}))
     _proxy_environment_keys = {
         "http_proxy",
@@ -59,9 +60,9 @@ class CloudflaredService(ManagedProcessService):
         "--edge-ip-version",
         "4",
         "--protocol",
-        # QUIC/UDP 7844 fails on this network during the edge TLS handshake;
-        # HTTP/2/TCP 7844 is the transport that successfully registers.
-        "http2",
+        # Let cloudflared select QUIC and fall back to HTTP/2. Network paths
+        # change; pinning HTTP/2 can strand the tunnel when only UDP works.
+        "auto",
         "--metrics",
         "127.0.0.1:20241",
         "tunnel",
@@ -97,20 +98,26 @@ class CloudflaredService(ManagedProcessService):
         self._health_check_failures_before_restart = sys.maxsize
 
     def _health_check(self) -> bool:
-        # Report readiness honestly even while the metrics process is alive.
+        # The connection gauge can remain positive after all ready connections
+        # are lost. Use /ready as the authoritative readiness signal.
         # Only sustained loss permits a restart; the cooldown preserves the
         # child's reconnect backoff during a prolonged network outage.
-        metrics_request = Request(
-            self._metrics_url,
+        readiness_request = Request(
+            self._ready_url,
             headers={"User-Agent": "Xiaoruo1-cloudflared-watchdog/1.0"},
         )
         try:
-            with self._health_opener.open(metrics_request, timeout=self._health_check_timeout_seconds) as response:
-                metrics = response.read(256 * 1024).decode("utf-8", "replace")
-            observation = observe_metrics(metrics)
+            with self._health_opener.open(readiness_request, timeout=self._health_check_timeout_seconds) as response:
+                body = response.read(64 * 1024).decode("utf-8", "replace")
+                observation = observe_readiness(response.status, body)
+        except HTTPError as exc:
+            # /ready returns HTTP 503 while the process is alive but no tunnel
+            # connection is ready. Do not mistake that response for a crash.
+            with exc:
+                observation = observe_readiness(exc.code, "")
         except Exception:
             # Do not put request details or raw exception text in service logs.
-            observation = TunnelObservation(False, False, "metrics_unreachable")
+            observation = TunnelObservation(False, False, "readiness_unreachable")
         decision = self._readiness.evaluate(observation, time.monotonic())
         for event in decision.events:
             self._write_health_log(event)
